@@ -134,4 +134,5 @@ N8N_CMD=./scripts/n8n-docker.sh node harness/n8n-dev.mjs check ${dir}/<name> --r
 - Do not weaken tests, \`config/\`, \`harness/\` or CI to make a check pass; flag it to the approver instead.
 - Keep pull requests small: one workflow change + its tests, or one harness change, not both.
 - Every bug fix adds a test that would have caught it.
+- After running \`ui\` (the sealed n8n editor), confirm it cleaned up: \`bash ./scripts/n8n-chamber.sh status\` must print CLEAN (exit 0). If it prints LEFTOVERS, run \`bash ./scripts/n8n-chamber.sh down\` and check again.
 `;
