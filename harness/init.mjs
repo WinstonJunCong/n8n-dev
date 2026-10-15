@@ -31,7 +31,7 @@ export function init(root, args) {
     "harness/changed.mjs": fs.readFileSync(path.join(root, "harness/changed.mjs"), "utf8"),
     "harness/init.mjs": fs.readFileSync(path.join(root, "harness/init.mjs"), "utf8"),
     "scripts/n8n-docker.sh": fs.readFileSync(path.join(root, "scripts/n8n-docker.sh"), "utf8").replace(/2\.43\.4/g, version),
-    [`${dir}/.gitkeep`]: "",
+    ...sampleWorkflow(root, dir),
     ".gitignore": "node_modules/\n.n8n-dev/\n",
     ".github/workflows/ci.yml": ci(version),
     ".github/pull_request_template.md": prTemplate(),
@@ -45,7 +45,25 @@ export function init(root, args) {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, content);
   }
-  console.log(`Created ${Object.keys(files).length} files in ${target}\n\nNext:\n  1. cd ${target} && npm install\n  2. Edit config/readiness.json (hosts, secret rules, outside node types)\n  3. Put each workflow in ${dir}/<name>/workflow.json with tests in tests/*.yaml\n  4. Turn on "Require status checks" for main in GitHub settings`);
+  console.log(`Created ${Object.keys(files).length} files in ${target}\n\nNext:\n  1. cd ${target} && npm install\n  2. Edit config/readiness.json (hosts, secret rules, outside node types)\n  3. Try the sample: N8N_CMD=./scripts/n8n-docker.sh node harness/n8n-dev.mjs check ${dir}/site-health-alert\n  4. Put each of your workflows in ${dir}/<name>/workflow.json with tests in tests/*.yaml\n  5. Turn on "Require status checks" for main in GitHub settings`);
+}
+
+// The generic sample (workflow.json + tests/*.yaml), so a new repo passes `check` straight away.
+// Falls back to an empty folder marker if this copy of the harness has no sample.
+function sampleWorkflow(root, dir) {
+  const config = JSON.parse(fs.readFileSync(path.join(root, "config/readiness.json"), "utf8"));
+  const src = path.join(root, config.workflowsDir || "workflows", "site-health-alert");
+  if (!fs.existsSync(path.join(src, "workflow.json"))) return { [`${dir}/.gitkeep`]: "" };
+  const out = {};
+  const walk = (rel) => {
+    for (const e of fs.readdirSync(path.join(src, rel), { withFileTypes: true })) {
+      const r = path.posix.join(rel, e.name);
+      if (e.isDirectory()) walk(r);
+      else out[`${dir}/site-health-alert/${r}`] = fs.readFileSync(path.join(src, r), "utf8");
+    }
+  };
+  walk("");
+  return out;
 }
 
 const ci = (version) => `# CI: runs on every pull request. A red check blocks the merge.
