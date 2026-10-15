@@ -1,0 +1,37 @@
+# CI: runs on every pull request that changes a workflow. A red check blocks the merge
+# (turn on "Require status checks to pass" for the main branch in GitHub settings).
+name: n8n checks
+on:
+  pull_request:
+    paths: ["workflows/**", "config/**", "harness/**", "scripts/**", ".github/workflows/**"]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }          # full history, so we can see what this pull request changed
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Reuse the n8n node list from earlier runs
+        uses: actions/cache@v4
+        with:
+          path: .n8n-dev/nodes-2.43.4.json
+          key: n8n-nodes-2.43.4
+      - run: docker pull -q n8nio/n8n:2.43.4
+      - name: Readiness scan, structure check and fake tests (changed workflows + their callers)
+        env:
+          N8N_CMD: bash ./scripts/n8n-docker.sh
+        run: |
+          status=0
+          dirs=$(node harness/changed.mjs "origin/${{ github.base_ref }}")
+          if [ -z "$dirs" ]; then echo "No workflows affected by this change." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          for d in $dirs; do
+            n=$(basename "$d")
+            node harness/n8n-dev.mjs check "$d" --report "reports/$n.md" || status=1
+            cat "reports/$n.md" >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit $status
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: n8n-dev-reports, path: reports/ }

@@ -1,0 +1,5 @@
+node_modules/
+.n8n-dev/
+reports/
+CLAUDE.md
+.claude/

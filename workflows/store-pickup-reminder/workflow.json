@@ -1,0 +1,415 @@
+{
+  "id": "storePickupRem01",
+  "name": "Store pick-up reminder",
+  "active": false,
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Order status webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "order-status",
+        "options": {}
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Load env_config",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "env_config"
+        },
+        "returnAll": true
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Find order in Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Load env_config').first().json.ORDERS_BASE_ID }}"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Load env_config').first().json.ORDERS_TABLE_ID }}"
+        },
+        "filterByFormula": "={Order ID}='{{ $('Order status webhook').first().json.body.order_id }}'",
+        "options": {}
+      },
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "cred-airtable",
+          "name": "Airtable – Orders"
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Is Pending Pick Up?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.Status }}",
+              "rightValue": "Pending Pick Up",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Compose store message",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        -120
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "record_id",
+              "value": "={{ $json.id }}",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "chat_id",
+              "value": "={{ $json['Store Chat ID'] }}",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "text",
+              "value": "=Order {{ $('Order status webhook').first().json.body.order_id }} is waiting for pick-up at {{ $json.Store }}. Please confirm when collected.",
+              "type": "string"
+            },
+            {
+              "id": "a4",
+              "name": "reminder_count",
+              "value": "={{ ($json['Reminder Count'] || 0) + 1 }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Send store reminder",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1100,
+        -120
+      ],
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "cred-telegram",
+          "name": "Telegram – Order Processing Bot"
+        }
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Update reminder count",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1320,
+        -120
+      ],
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Load env_config').first().json.ORDERS_BASE_ID }}"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Load env_config').first().json.ORDERS_TABLE_ID }}"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $('Compose store message').item.json.record_id }}",
+            "Reminder Count": "={{ $('Compose store message').item.json.reminder_count }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "cred-airtable",
+          "name": "Airtable – Orders"
+        }
+      }
+    },
+    {
+      "id": "n8",
+      "name": "Is Ready for collection?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.Status }}",
+              "rightValue": "Ready",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "n9",
+      "name": "Compose customer message",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1100,
+        60
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b1",
+              "name": "contact_id",
+              "value": "={{ $json['Customer Contact ID'] }}",
+              "type": "string"
+            },
+            {
+              "id": "b2",
+              "name": "message",
+              "value": "=Hi! Your order {{ $('Order status webhook').first().json.body.order_id }} is ready for collection at {{ $json.Store }}.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n10",
+      "name": "Notify customer (Respond.io)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        60
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Load env_config').first().json.RESPOND_IO_API }}/contact/id:{{ $json.contact_id }}/message",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: { type: 'text', text: $json.message } }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "cred-respondio",
+          "name": "Respond.io API"
+        }
+      }
+    },
+    {
+      "id": "n11",
+      "name": "Ignore other statuses",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        200
+      ],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Order status webhook": {
+      "main": [
+        [
+          {
+            "node": "Load env_config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load env_config": {
+      "main": [
+        [
+          {
+            "node": "Find order in Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find order in Airtable": {
+      "main": [
+        [
+          {
+            "node": "Is Pending Pick Up?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Pending Pick Up?": {
+      "main": [
+        [
+          {
+            "node": "Compose store message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Ready for collection?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose store message": {
+      "main": [
+        [
+          {
+            "node": "Send store reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send store reminder": {
+      "main": [
+        [
+          {
+            "node": "Update reminder count",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Ready for collection?": {
+      "main": [
+        [
+          {
+            "node": "Compose customer message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore other statuses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose customer message": {
+      "main": [
+        [
+          {
+            "node": "Notify customer (Respond.io)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

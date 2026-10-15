@@ -1,0 +1,18 @@
+{
+  "n8nVersion": "2.43.4",
+  "workflowsDir": "workflows",
+  "configHint": "env_config",
+  "allowedHosts": ["api.telegram.org", "api.airtable.com", "api.respond.io"],
+  "liveN8nHosts": ["n8n.example.com"],
+  "secretRules": [
+    { "id": "secret", "pattern": "(Bearer\\s+[A-Za-z0-9._-]{16,}|\\bpat[A-Za-z0-9]{14}\\.[a-f0-9]{20,}|\\bsk-[A-Za-z0-9]{20,}|\\b\\d{8,10}:[A-Za-z0-9_-]{35}\\b)", "message": "Key or token typed into the node; move it into a credential" },
+    { "id": "airtable-id", "pattern": "\\b(app|tbl|fld)[A-Za-z0-9]{14}\\b", "message": "Airtable ID typed into the node; read it from {configHint}" },
+    { "id": "chat-id", "pattern": "-100\\d{6,}", "message": "Telegram chat ID typed into the node; read it from {configHint}" }
+  ],
+  "outsideNodeTypes": [
+    "n8n-nodes-base.httpRequest", "n8n-nodes-base.airtable", "n8n-nodes-base.airtableTrigger",
+    "n8n-nodes-base.telegram", "n8n-nodes-base.telegramTrigger", "n8n-nodes-base.dataTable",
+    "n8n-nodes-base.supabase", "n8n-nodes-base.awsS3", "n8n-nodes-base.googleSheets",
+    "n8n-nodes-base.n8n", "@respond-io/n8n-nodes-respond-io.respondio"
+  ]
+}

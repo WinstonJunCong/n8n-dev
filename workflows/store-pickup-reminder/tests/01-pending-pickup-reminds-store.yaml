@@ -1,0 +1,22 @@
+test: Pending pick up reminds the store
+trigger:                       # fake incoming webhook body
+  order_id: TEST-001
+  status_changed_to: Pending Pick Up
+mocks:                         # fake outputs for every outside step on this path
+  "Load env_config":
+    - { ORDERS_BASE_ID: appTESTBASE000001, ORDERS_TABLE_ID: tblTESTORDERS0001, RESPOND_IO_API: "https://api.respond.io/v2" }
+  "Find order in Airtable":
+    - { id: rec123, Status: Pending Pick Up, Store: Downtown, "Store Chat ID": "-100555", "Customer Contact ID": "c-42", "Reminder Count": 2 }
+  "Send store reminder":
+    - { ok: true }
+  "Update reminder count":
+    - { id: rec123 }
+assert:
+  - node "Send store reminder" called 1 time
+  - node "Send store reminder" input.chat_id == "-100555"
+  - node "Send store reminder" input.text contains "TEST-001"
+  - node "Send store reminder" input.text contains "Downtown"
+  - node "Compose store message" output.reminder_count == 3
+  - node "Update reminder count" called 1 time
+  - node "Notify customer (Respond.io)" not called
+  - workflow ends at "Update reminder count"

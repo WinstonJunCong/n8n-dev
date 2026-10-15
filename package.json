@@ -1,0 +1,9 @@
+{
+  "name": "n8n-dev",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "n8n-dev": "harness/n8n-dev.mjs" },
+  "scripts": { "check": "node harness/n8n-dev.mjs check" },
+  "dependencies": { "yaml": "^2.5.0" }
+}

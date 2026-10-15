@@ -1,0 +1,18 @@
+test: Ready order notifies the customer, not the store
+trigger:
+  order_id: TEST-002
+  status_changed_to: Ready
+mocks:
+  "Load env_config":
+    - { ORDERS_BASE_ID: appTESTBASE000001, ORDERS_TABLE_ID: tblTESTORDERS0001, RESPOND_IO_API: "https://api.respond.io/v2" }
+  "Find order in Airtable":
+    - { id: rec456, Status: Ready, Store: Riverside, "Store Chat ID": "-100777", "Customer Contact ID": "c-99" }
+  "Notify customer (Respond.io)":
+    - { contactId: c-99, messageId: m-1 }
+assert:
+  - node "Notify customer (Respond.io)" called 1 time
+  - node "Notify customer (Respond.io)" input.contact_id == "c-99"
+  - node "Notify customer (Respond.io)" input.message contains "Hi! Your order TEST-002 is ready for collection"
+  - node "Notify customer (Respond.io)" input.message contains "Riverside"
+  - node "Send store reminder" not called
+  - node "Update reminder count" not called

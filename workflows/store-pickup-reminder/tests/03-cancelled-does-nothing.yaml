@@ -1,0 +1,13 @@
+test: Cancelled order sends nothing
+trigger:
+  order_id: TEST-003
+  status_changed_to: Cancelled
+mocks:
+  "Load env_config":
+    - { ORDERS_BASE_ID: appTESTBASE000001, ORDERS_TABLE_ID: tblTESTORDERS0001, RESPOND_IO_API: "https://api.respond.io/v2" }
+  "Find order in Airtable":
+    - { id: rec789, Status: Cancelled, Store: JB City Square, "Store Chat ID": "-100888", "Customer Contact ID": "c-07" }
+assert:
+  - node "Send store reminder" not called
+  - node "Notify customer (Respond.io)" not called
+  - workflow ends at "Ignore other statuses"
