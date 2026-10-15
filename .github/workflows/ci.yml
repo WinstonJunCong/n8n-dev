@@ -1,9 +1,8 @@
-# CI: runs on every pull request that changes a workflow. A red check blocks the merge
+# CI: runs on every pull request. A red check blocks the merge
 # (turn on "Require status checks to pass" for the main branch in GitHub settings).
 name: n8n checks
 on:
   pull_request:
-    paths: ["workflows/**", "config/**", "harness/**", "scripts/**", ".github/workflows/**"]
 jobs:
   check:
     runs-on: ubuntu-latest
