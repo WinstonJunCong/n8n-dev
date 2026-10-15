@@ -33,7 +33,7 @@ export function init(root, args) {
     "scripts/n8n-docker.sh": fs.readFileSync(path.join(root, "scripts/n8n-docker.sh"), "utf8").replace(/2\.43\.4/g, version),
     [`${dir}/.gitkeep`]: "",
     ".gitignore": "node_modules/\n.n8n-dev/\n",
-    ".github/workflows/ci.yml": ci(dir, version),
+    ".github/workflows/ci.yml": ci(version),
     ".github/pull_request_template.md": prTemplate(),
     "CLAUDE.md": claudeMd(dir, approver, liveHost),
   };
@@ -48,11 +48,10 @@ export function init(root, args) {
   console.log(`Created ${Object.keys(files).length} files in ${target}\n\nNext:\n  1. cd ${target} && npm install\n  2. Edit config/readiness.json (hosts, secret rules, outside node types)\n  3. Put each workflow in ${dir}/<name>/workflow.json with tests in tests/*.yaml\n  4. Turn on "Require status checks" for main in GitHub settings`);
 }
 
-const ci = (dir, version) => `# CI: runs on every pull request that changes a workflow. A red check blocks the merge.
+const ci = (version) => `# CI: runs on every pull request. A red check blocks the merge.
 name: n8n checks
 on:
   pull_request:
-    paths: ["${dir}/**", "config/**", "harness/**", "scripts/**", ".github/workflows/**"]
 jobs:
   check:
     runs-on: ubuntu-latest
