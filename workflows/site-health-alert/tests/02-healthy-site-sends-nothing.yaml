@@ -1,0 +1,12 @@
+test: Healthy site sends nothing
+trigger:
+  site: docs
+mocks:
+  "Load env_config":
+    - { STATUS_URL: "https://status.example.test/check", ALERT_URL: "https://alerts.example.test/send" }
+  "Check site status":
+    - { status: ok, latency_ms: 90 }
+assert:
+  - node "Send alert" not called
+  - node "Compose alert" not called
+  - workflow ends at "Ignore healthy site"

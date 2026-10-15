@@ -78,6 +78,12 @@ Supported checks: `called N time(s)`, `not called`, `input.<field>` / `output.<f
 
 Build messages in a Set node before the send step so tests can check the text. Check full phrases, not fragments.
 
+If an assertion contains a colon followed by a space (for example `status: down`), wrap the whole line in single quotes, or YAML will read it as a key:
+
+```yaml
+  - 'node "Send alert" input.text contains "ALERT: docs is not healthy"'
+```
+
 ## What's inside
 
 ```
