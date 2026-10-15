@@ -1,0 +1,15 @@
+test: Degraded site also alerts
+trigger:
+  site: api
+mocks:
+  "Load env_config":
+    - { STATUS_URL: "https://status.example.test/check", ALERT_URL: "https://alerts.example.test/send" }
+  "Check site status":
+    - { status: degraded, latency_ms: 800 }
+  "Send alert":
+    - { ok: true }
+assert:
+  - node "Send alert" called 1 time
+  - 'node "Send alert" input.text contains "ALERT: api is not healthy (status: degraded, 800 ms)"'
+  - node "Compose alert" output.text != ""
+  - workflow ends at "Send alert"
