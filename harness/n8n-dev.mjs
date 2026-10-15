@@ -4,6 +4,7 @@
 //   n8n-dev structure <workflow-dir> [--workflow-file f.json]   valid nodes, versions, connections
 //   n8n-dev test      <workflow-dir> [--workflow-file f.json]   run YAML tests with every outside step faked
 //   n8n-dev check     <workflow-dir> [--workflow-file f.json]   all three + markdown/JSON report (what CI runs)
+//   n8n-dev ui        <workflow-dir> [--port 5678]              the faked tests in a sealed local n8n editor (needs Docker)
 // The n8n CLI is taken from $N8N_CMD (default "n8n"). Each run uses a fresh, throwaway n8n data folder,
 // so nothing touches a real n8n, real credentials or real services.
 import fs from "node:fs";
@@ -205,6 +206,62 @@ function runTests(wf) {
   });
 }
 
+// ---------- 4. ui: the faked tests in a sealed local n8n editor ----------
+// Builds the same faked copies the tests use (outside steps = Code nodes, trigger = fake event) and loads them
+// into the chamber (scripts/n8n-chamber.sh): an n8n editor with no route out, no repo mounted, and a throwaway
+// database. Open one, click "Execute workflow", and watch each step's data. Ctrl+C removes everything.
+// Colours the simulated parts so a person can tell fake from real at a glance. Sticky notes sit behind nodes and
+// are never executed, so this only changes how the canvas looks (node names stay as they are; tests rely on them).
+function decorateForUi(v, wf) {
+  const SIMULATED = 7, LEGEND = 6;                 // n8n sticky-note colour indexes
+  const trigger = wf.nodes.find(isTrigger);
+  const simulated = wf.nodes.filter((n) => isTrigger(n) || isOutside(n)).map((n) => n.name);
+  const pos = (name) => v.nodes.find((n) => n.name === name).position;
+  const notes = [];
+  const note = (name, x, y, width, height, content, color) =>
+    notes.push({ id: `ui-note-${notes.length + 1}`, name, type: "n8n-nodes-base.stickyNote", typeVersion: 1, position: [x, y], parameters: { content, width, height, color } });
+  const [sx, sy] = pos("__test_start__"), [tx, ty] = pos(trigger.name);
+  const left = Math.min(sx, tx) - 30;
+  note("Note: test input", left, Math.min(sy, ty) - 70, Math.max(sx, tx) + 130 - left, 240, "### TEST INPUT\nThe fake event from the test file", SIMULATED);
+  for (const name of simulated.filter((n) => n !== trigger.name)) {
+    const [x, y] = pos(name);
+    note(`Note: simulated ${name}`, x - 30, y - 70, 160, 240, "### SIMULATED\nFake reply from the test file", SIMULATED);
+  }
+  const top = Math.min(...v.nodes.map((n) => n.position[1])) - 70;
+  note("Note: how to read this", Math.min(...v.nodes.map((n) => n.position[0])) - 30, top - 190, 560, 160,
+    "### How to read this canvas\nThe **grey backdrops** are simulated by the test: the fake event and the fake replies from outside services.\nEverything **without** a backdrop is your real workflow logic, running for real.\nClick **Execute workflow** to run it.", LEGEND);
+  v.nodes.push(...notes);
+  return v;
+}
+
+function openUi(wf) {
+  const testDir = path.join(wfDir, "tests");
+  const files = fs.existsSync(testDir) ? fs.readdirSync(testDir).filter((f) => /\.ya?ml$/.test(f)).sort() : [];
+  if (!files.length) { console.error("No tests found under " + testDir); process.exit(1); }
+  const port = flag("--port") || "5678";
+  if (!/^\d{2,5}$/.test(port)) { console.error(`--port must be a number, got "${port}"`); process.exit(2); }
+  if (spawnSync("docker --version", { shell: SHELL, encoding: "utf8" }).status !== 0) {
+    console.error("ui needs Docker, because the sealed chamber runs in it. Install Docker Desktop and try again.");
+    process.exit(1);
+  }
+  const varDir = freshDir("ui-variants");
+  const slug = path.basename(wfDir).replace(/[^a-z0-9]/gi, "").slice(0, 8);
+  try {
+    files.forEach((f, i) => {
+      const test = parseYaml(fs.readFileSync(path.join(testDir, f), "utf8"));
+      const id = `ui${slug}${String(i + 1).padStart(2, "0")}`.slice(0, 16);
+      fs.writeFileSync(path.join(varDir, `${id}.json`), JSON.stringify(decorateForUi(buildVariant(wf, test, id), wf)));
+    });
+  } catch (e) { console.error("Could not build the faked copies: " + e.message); process.exit(1); }
+  spawnSync(`bash ./scripts/n8n-chamber.sh run ${JSON.stringify(rel(varDir))}`, {
+    shell: SHELL, cwd: ROOT, stdio: "inherit",
+    env: { ...process.env, N8N_VERSION, N8N_PORT: port, MSYS_NO_PATHCONV: "1" },
+  });
+  // Confirm nothing is left running. Exit code: 0 = clean, 1 = leftovers, 2 = could not check.
+  const left = spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" });
+  process.exit(left.status ?? 2);
+}
+
 // ---------- report ----------
 function report(wf, s, st, tests) {
   const ok = (b) => (b ? "PASS" : "FAIL");
@@ -230,12 +287,13 @@ function report(wf, s, st, tests) {
 
 // ---------- main ----------
 if (cmd === "init") { (await import("./init.mjs")).init(ROOT, args.slice(1)); process.exit(0); }
-if (!["scan", "structure", "test", "check"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check> <workflow-dir> [--workflow-file file.json] [--report out.md]");
+if (!["scan", "structure", "test", "check", "ui"].includes(cmd) || !wfDir) {
+  console.log("usage: n8n-dev <scan|structure|test|check|ui> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678]");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
-const s = ["scan", "check"].includes(cmd) ? scan(wf) : null;
+if (cmd === "ui") { openUi(wf); process.exit(0); }
+const s =["scan", "check"].includes(cmd) ? scan(wf) : null;
 const st = ["structure", "check"].includes(cmd) ? structure(wf) : null;
 const tests = ["test", "check"].includes(cmd) ? runTests(wf) : null;
 const { allPass, md } = report(wf, s, st, tests);
