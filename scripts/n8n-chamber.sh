@@ -16,6 +16,8 @@ export MSYS_NO_PATHCONV=1                      # stop Git Bash on Windows rewrit
 IMAGE="n8nio/n8n:${N8N_VERSION:-2.43.4}"
 PORT="${N8N_PORT:-5678}"
 NET=n8n-chamber-net; APP=n8n-chamber-app; FWD=n8n-chamber-fwd; VOL=n8n-chamber-data; IMP=n8n-chamber-import
+# Nodes that can run commands or touch files. One list, used by the editor and by the proof, so they cannot drift apart.
+EXCLUDE='["n8n-nodes-base.executeCommand","n8n-nodes-base.readWriteFile","n8n-nodes-base.localFileTrigger"]'
 
 down() {
   docker rm -f "$FWD" "$APP" "$IMP" >/dev/null 2>&1
@@ -64,7 +66,7 @@ up() {
     -e N8N_TEMPLATES_ENABLED=false -e N8N_PERSONALIZATION_ENABLED=false \
     -e N8N_RUNNERS_ENABLED=true -e N8N_SECURE_COOKIE=false \
     -e N8N_RESTRICT_FILE_ACCESS_TO=/home/node/.n8n-files \
-    -e NODES_EXCLUDE='["n8n-nodes-base.executeCommand","n8n-nodes-base.readWriteFile","n8n-nodes-base.localFileTrigger"]' \
+    -e NODES_EXCLUDE="$EXCLUDE" \
     --entrypoint n8n "$IMAGE" start >/dev/null || return 1
   # The window: the only container with a published port, bound to loopback. It forwards inbound
   # connections to the editor and nothing else (same image, so there is nothing extra to download).
@@ -124,6 +126,22 @@ proof() {
     if docker exec "$APP" node -e "$PROBE" "$url" >/dev/null 2>&1; then bad "the editor container REACHED $url"
     else ok "the editor container cannot reach $url"; fi
   done
+
+  # The dangerous nodes must not load. The editor's own node list needs a login, so a short-lived sealed
+  # container with the SAME exclusion setting lists the nodes n8n actually loads. The httpRequest line is the
+  # control: if the list could not be produced, "not found" would mean nothing, so that case fails.
+  local listed
+  listed=$(docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+    -e NODES_EXCLUDE="$EXCLUDE" -e N8N_DIAGNOSTICS_ENABLED=false -e N8N_RUNNERS_ENABLED=true \
+    --entrypoint sh "$IMAGE" -c '
+      n8n export:nodes --output=/tmp/nodes.json >/dev/null 2>&1
+      grep -q "n8n-nodes-base.httpRequest" /tmp/nodes.json 2>/dev/null || { echo NOLIST; exit 0; }
+      for t in executeCommand readWriteFile localFileTrigger; do
+        grep -q "n8n-nodes-base.$t" /tmp/nodes.json && echo "$t"
+      done' 2>/dev/null)
+  if [ "$listed" = "NOLIST" ]; then bad "could not list the nodes n8n loads, so the node exclusions are unproven"
+  elif [ -z "$listed" ]; then ok "execute-command and file read/write nodes do not load (the HTTP Request node does, as the control)"
+  else bad "these nodes still load despite the exclusion: $(echo $listed)"; fi
 
   local mounts
   mounts=$(docker inspect "$APP" --format '{{range .Mounts}}{{.Type}}:{{.Name}}:{{.Destination}} {{end}}')
