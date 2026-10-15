@@ -40,7 +40,7 @@ Without Docker, install n8n with npm and leave `N8N_CMD` unset.
 node harness/n8n-dev.mjs init ../my-n8n-repo --workflows-dir workflows --n8n-version <your version> --live-host <your n8n host> --approver "<name>"
 ```
 
-This creates a new folder with the harness, config, Docker script, CI file, PR template and a `CLAUDE.md`. It never overwrites existing files.
+This creates a new folder with the harness, config, Docker script, CI file, PR template, a `CLAUDE.md`, and a small sample workflow (`site-health-alert`) with tests that pass straight away. It never overwrites existing files. Delete the sample once you have your own workflows.
 
 Then put each workflow in `<workflows-dir>/<name>/workflow.json`, with its tests in `tests/*.yaml`.
 
