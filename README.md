@@ -42,7 +42,7 @@ Without Docker, install n8n with npm and leave `N8N_CMD` unset.
 node harness/n8n-dev.mjs ui workflows/site-health-alert
 ```
 
-It loads one `[test] ...` workflow per test file into a sealed local n8n and prints a sign-in. Open the address it shows (`http://127.0.0.1:5678`), open a workflow, and click **Execute workflow** to watch the data move through each step. Press **Ctrl+C** to stop. Use `--port 5679` to change the port.
+It loads one `[test] ...` workflow per test file into a sealed local n8n. Open `http://127.0.0.1:5678` and sign in with `test@test.com` / `Test1234` (a throwaway local account the command creates for you; if the page shows a sign-up form instead, refresh the tab). Open a workflow, and click **Execute workflow** to watch the data move through each step. Press **Ctrl+C** to stop. Use `--port 5679` to change the port.
 
 On the canvas, a coloured backdrop marks what the test **simulates**: the fake incoming event, and the fake reply from each outside service. Everything without a backdrop is your real workflow logic, running for real. You can poke at it, change a condition, or add nodes to see what happens.
 
@@ -52,9 +52,16 @@ On the canvas, a coloured backdrop marks what the test **simulates**: the fake i
 - **One window in.** A small forwarder container publishes the editor on `127.0.0.1` only, so nothing else on your network can reach it.
 - **Throwaway.** Everything, including the local login, is deleted when you stop it. The execute-command and file read/write nodes are switched off.
 
-Never paste a real key or password into it. The login it creates is a fake local one.
+Never paste a real key or password into it. The `test@test.com` login is fake and only works inside that one chamber.
 
-**Edits are not saved back.** Changes you make in the editor disappear when you stop it. To keep a change, make it in `workflow.json` and run `check` again.
+**Keeping a change you made in the editor.** Edit in the editor. n8n saves automatically about a second and a half after you stop changing things (Ctrl+S saves at once), so wait a couple of seconds after your last change. When you press Ctrl+C, the chamber saves your workflows to `.n8n-dev/ui-export`, prints what you changed, and deletes itself. To bring those changes into `workflow.json`:
+
+```bash
+node harness/n8n-dev.mjs pull workflows/site-health-alert           # shows what would change; writes nothing
+node harness/n8n-dev.mjs pull workflows/site-health-alert --apply   # updates workflow.json
+```
+
+`pull` only applies changes to your real steps. Edits to a simulated step (the fake event or a fake reply) are listed as not applied: change the fake data in the test's YAML instead. It refuses to write if the result would fail the readiness scan (for example, a key pasted into a node), if `workflow.json` changed while the chamber was open (add `--force` to override), or if two test copies were edited in conflicting ways. It never copies credentials, because the chamber has none. After a pull, run `check`, read `git diff`, and open a pull request as usual.
 
 Check that nothing was left behind, or prove the seal on your own machine:
 
@@ -121,7 +128,9 @@ If an assertion contains a colon followed by a space (for example `status: down`
 workflows/store-pickup-reminder/   sample workflow and 3 tests (pending, ready, cancelled)
 workflows/site-health-alert/       a small, service-neutral sample workflow and 3 tests
 changes/                           a sample bad change that the checker must reject
-harness/n8n-dev.mjs                the checker: scan | structure | test | check | ui | init
+harness/n8n-dev.mjs                the checker: scan | structure | test | check | ui | pull | init
+harness/merge.mjs                  merges edits made in the editor back into a workflow (used by pull)
+harness/pull.mjs                   plans and describes a pull
 harness/changed.mjs                which workflows a pull request affects (changed ones and their callers)
 harness/init.mjs                   scaffolds a new repo
 config/readiness.json              your settings
@@ -138,7 +147,7 @@ n8n's command-line runner ignores pinned data, so the harness swaps each outside
 
 - Two small sample workflows, with three tests each.
 - Only n8n. It relies on n8n's own command line.
-- The `ui` editor needs Docker, and edits made in it are not saved back to the repo.
+- The `ui` editor needs Docker. `pull` brings back changes to existing and new steps and connections, but not the layout (node positions) and not changes to simulated steps.
 - Deploying to a live n8n, approvals and monitoring are not included.
 
 ## Licence
