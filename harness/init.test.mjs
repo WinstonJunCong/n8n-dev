@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { init } from "./init.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -54,5 +55,34 @@ test("the generated repo keeps shell scripts on Unix line endings", () => {
   try {
     assert.match(fs.readFileSync(path.join(target, ".gitattributes"), "utf8"), /\*\.sh text eol=lf/);
     for (const f of filesIn(path.join(target, "scripts"))) assert.ok(!fs.readFileSync(path.join(target, "scripts", f), "utf8").includes("\r"));
+  } finally { fs.rmSync(target, { recursive: true, force: true }); }
+});
+
+// The strongest check: run the generated repo's own unit tests inside it. A repo whose own `npm test` fails would
+// turn its CI red on the very first run. The env guard stops the tests inside from generating yet another repo.
+test("the generated repo's own unit tests pass inside it", {
+  skip: process.env.N8N_DEV_NESTED_TEST ? "already running inside a generated repo" : false,
+}, () => {
+  const target = generate();
+  try {
+    const tests = filesIn(path.join(target, "harness")).filter((f) => f.endsWith(".test.mjs")).map((f) => `harness/${f}`);
+    // NODE_TEST_CONTEXT is set by the outer test runner. If it were inherited, the inner `node --test` would not act
+    // as a runner and would exit 0 even when tests fail (a false pass).
+    const env = { ...process.env, N8N_DEV_NESTED_TEST: "1" };
+    delete env.NODE_TEST_CONTEXT;
+    const r = spawnSync(process.execPath, ["--test", ...tests], { cwd: target, encoding: "utf8", env });
+    const failures = (r.stdout + r.stderr).slice(-1500);
+    assert.equal(r.status, 0, `the generated repo's tests failed:\n${failures}`);
+  } finally { fs.rmSync(target, { recursive: true, force: true }); }
+});
+
+test("the generated CI is this repo's CI, and it runs the unit tests", () => {
+  const target = generate();
+  try {
+    const mine = fs.readFileSync(path.join(ROOT, ".github/workflows/ci.yml"), "utf8").replace(/\r\n/g, "\n");
+    const theirs = fs.readFileSync(path.join(target, ".github/workflows/ci.yml"), "utf8");
+    assert.equal(theirs, mine);                       // same default version, so they must be identical
+    assert.match(theirs, /run: npm test/);
+    assert.match(theirs, /Find the workflows this pull request affects/);
   } finally { fs.rmSync(target, { recursive: true, force: true }); }
 });
