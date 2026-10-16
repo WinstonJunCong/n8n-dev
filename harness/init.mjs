@@ -27,12 +27,13 @@ export function init(root, args) {
     "package-lock.json": JSON.stringify(lock, null, 2) + "\n",
     "config/readiness.json": JSON.stringify(config, null, 2) + "\n",
     "package.json": JSON.stringify(pkg, null, 2) + "\n",
-    "harness/n8n-dev.mjs": fs.readFileSync(path.join(root, "harness/n8n-dev.mjs"), "utf8"),
-    "harness/changed.mjs": fs.readFileSync(path.join(root, "harness/changed.mjs"), "utf8"),
-    "harness/init.mjs": fs.readFileSync(path.join(root, "harness/init.mjs"), "utf8"),
-    "scripts/n8n-docker.sh": fs.readFileSync(path.join(root, "scripts/n8n-docker.sh"), "utf8").replace(/2\.43\.4/g, version),
+    // Every file in harness/ and scripts/, not a hand-kept list: the harness imports its own helper files, so a
+    // missing one breaks every command in the new repo.
+    ...copyFolder(root, "harness"),
+    ...copyFolder(root, "scripts", (s) => s.replace(/2\.43\.4/g, version)),
     ...sampleWorkflow(root, dir),
     ".gitignore": "node_modules/\n.n8n-dev/\n",
+    ".gitattributes": "# Shell scripts must keep Unix line endings, or bash fails with a confusing \"\\r: command not found\" error.\n*.sh text eol=lf\n",
     ".github/workflows/ci.yml": ci(version),
     ".github/pull_request_template.md": prTemplate(),
     "CLAUDE.md": claudeMd(dir, approver, liveHost),
@@ -46,6 +47,18 @@ export function init(root, args) {
     fs.writeFileSync(p, content);
   }
   console.log(`Created ${Object.keys(files).length} files in ${target}\n\nNext:\n  1. cd ${target} && npm install\n  2. Edit config/readiness.json (hosts, secret rules, outside node types)\n  3. Try the sample: N8N_CMD=./scripts/n8n-docker.sh node harness/n8n-dev.mjs check ${dir}/site-health-alert\n  4. Put each of your workflows in ${dir}/<name>/workflow.json with tests in tests/*.yaml\n  5. Turn on "Require status checks" for main in GitHub settings`);
+}
+
+// All files directly inside <root>/<folder>, keyed by their path in the new repo. `edit` can rewrite the text.
+function copyFolder(root, folder, edit = (s) => s) {
+  const out = {};
+  for (const f of fs.readdirSync(path.join(root, folder), { withFileTypes: true })) {
+    if (!f.isFile()) continue;
+    let text = fs.readFileSync(path.join(root, folder, f.name), "utf8");
+    if (f.name.endsWith(".sh")) text = text.replace(/\r\n/g, "\n");   // bash scripts must be LF, whatever the checkout did
+    out[`${folder}/${f.name}`] = edit(text);
+  }
+  return out;
 }
 
 // The generic sample (workflow.json + tests/*.yaml), so a new repo passes `check` straight away.

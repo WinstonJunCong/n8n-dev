@@ -4,6 +4,6 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": { "n8n-dev": "harness/n8n-dev.mjs" },
-  "scripts": { "check": "node harness/n8n-dev.mjs check", "test": "node --test harness/merge.test.mjs harness/pull.test.mjs" },
+  "scripts": { "check": "node harness/n8n-dev.mjs check", "test": "node --test harness/merge.test.mjs harness/pull.test.mjs harness/init.test.mjs" },
   "dependencies": { "yaml": "^2.5.0" }
 }
