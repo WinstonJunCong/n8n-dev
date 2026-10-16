@@ -15,15 +15,16 @@ export const isHarnessNode = (n) => n.id === "test-start" || String(n.id).starts
 // Fields that are cosmetic or per-copy, never pulled.
 const IGNORED_FIELDS = new Set(["id", "position"]);
 
-// Canonical form: sorted keys, and empty objects / undefined dropped. n8n sometimes adds or drops an empty
-// `options: {}` when it saves, which is not a real change.
+// Canonical form: sorted keys, and empty objects, empty strings and undefined dropped from objects. When n8n saves
+// it sometimes adds or drops an empty default (`options: {}`, `leftValue: ""`), which is not a real change.
+// An empty string only equals a MISSING field: "foo" changed to "" is still a change.
 export function canon(v) {
   if (Array.isArray(v)) return v.map(canon);
   if (v && typeof v === "object") {
     const out = {};
     for (const k of Object.keys(v).sort()) {
       const c = canon(v[k]);
-      if (c === undefined) continue;
+      if (c === undefined || c === "") continue;
       if (c && typeof c === "object" && !Array.isArray(c) && Object.keys(c).length === 0) continue;
       out[k] = c;
     }
@@ -33,7 +34,7 @@ export function canon(v) {
 }
 const text = (x) => {
   const c = canon(x);
-  if (c === undefined) return "";
+  if (c === undefined || c === "") return "";
   if (c && typeof c === "object" && !Array.isArray(c) && Object.keys(c).length === 0) return "";
   return JSON.stringify(c);
 };

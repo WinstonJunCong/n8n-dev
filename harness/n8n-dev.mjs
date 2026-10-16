@@ -10,6 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
@@ -245,15 +246,24 @@ function openUi(wf) {
     process.exit(1);
   }
   const varDir = freshDir("ui-variants");
+  const exportDir = freshDir("ui-export");
   const slug = path.basename(wfDir).replace(/[^a-z0-9]/gi, "").slice(0, 8);
+  const variants = [];
   try {
     files.forEach((f, i) => {
       const test = parseYaml(fs.readFileSync(path.join(testDir, f), "utf8"));
       const id = `ui${slug}${String(i + 1).padStart(2, "0")}`.slice(0, 16);
       fs.writeFileSync(path.join(varDir, `${id}.json`), JSON.stringify(decorateForUi(buildVariant(wf, test, id), wf)));
+      variants.push({ id, test: test.test });
     });
   } catch (e) { console.error("Could not build the faked copies: " + e.message); process.exit(1); }
-  spawnSync(`bash ./scripts/n8n-chamber.sh run ${JSON.stringify(rel(varDir))}`, {
+  // Kept outside variantsDir on purpose: that folder is imported into n8n as-is. `pull` uses this to know which
+  // workflow the copies came from and to notice if workflow.json changed while the chamber was open.
+  fs.writeFileSync(path.join(WORK, "ui-manifest.json"), JSON.stringify({
+    workflowDir: rel(wfDir), workflowFile: rel(wfFile), realHash: createHash("sha256").update(JSON.stringify(wf)).digest("hex"),
+    variantsDir: rel(varDir), exportDir: rel(exportDir), variants, createdAt: new Date().toISOString(),
+  }, null, 2));
+  spawnSync(`bash ./scripts/n8n-chamber.sh run ${JSON.stringify(rel(varDir))} ${JSON.stringify(rel(exportDir))}`, {
     shell: SHELL, cwd: ROOT, stdio: "inherit",
     env: { ...process.env, N8N_VERSION, N8N_PORT: port, MSYS_NO_PATHCONV: "1" },
   });
