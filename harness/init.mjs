@@ -26,6 +26,7 @@ export function init(root, args) {
   const files = {
     "package-lock.json": JSON.stringify(lock, null, 2) + "\n",
     "config/readiness.json": JSON.stringify(config, null, 2) + "\n",
+    "config/readiness.example.json": fs.readFileSync(path.join(root, "config/readiness.example.json"), "utf8"),   // init itself reads this
     "package.json": JSON.stringify(pkg, null, 2) + "\n",
     // Every file in harness/ and scripts/, not a hand-kept list: the harness imports its own helper files, so a
     // missing one breaks every command in the new repo.
@@ -34,7 +35,8 @@ export function init(root, args) {
     ...sampleWorkflow(root, dir),
     ".gitignore": "node_modules/\n.n8n-dev/\n",
     ".gitattributes": "# Shell scripts must keep Unix line endings, or bash fails with a confusing \"\\r: command not found\" error.\n*.sh text eol=lf\n",
-    ".github/workflows/ci.yml": ci(version),
+    // This repo's own CI file, so the generated one can never fall behind it.
+    ".github/workflows/ci.yml": fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8").replace(/\r\n/g, "\n").replace(/2\.43\.4/g, version),
     ".github/pull_request_template.md": prTemplate(),
     "CLAUDE.md": claudeMd(dir, approver, liveHost),
   };
@@ -79,42 +81,6 @@ function sampleWorkflow(root, dir) {
   return out;
 }
 
-const ci = (version) => `# CI: runs on every pull request. A red check blocks the merge.
-name: n8n checks
-on:
-  pull_request:
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }          # full history, so we can see what this pull request changed
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
-      - run: npm ci
-      - name: Reuse the n8n node list from earlier runs
-        uses: actions/cache@v4
-        with:
-          path: .n8n-dev/nodes-${version}.json
-          key: n8n-nodes-${version}
-      - run: docker pull -q n8nio/n8n:${version}
-      - name: Readiness scan, structure check and fake tests (changed workflows + their callers)
-        env:
-          N8N_CMD: bash ./scripts/n8n-docker.sh
-        run: |
-          status=0
-          dirs=$(node harness/changed.mjs "origin/\${{ github.base_ref }}")
-          if [ -z "$dirs" ]; then echo "No workflows affected by this change." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
-          for d in $dirs; do
-            n=$(basename "$d")
-            node harness/n8n-dev.mjs check "$d" --report "reports/$n.md" || status=1
-            cat "reports/$n.md" >> "$GITHUB_STEP_SUMMARY"
-          done
-          exit $status
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with: { name: n8n-dev-reports, path: reports/ }
-`;
 
 const prTemplate = () => `## What changed
 <!-- One workflow change and its tests, or one harness change. Not both. -->

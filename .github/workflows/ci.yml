@@ -14,6 +14,8 @@ jobs:
         with: { fetch-depth: 0 }          # full history, so we can see what this pull request changed
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
+      - name: Unit tests for the harness
+        run: npm test                     # runs on every pull request: it needs no install and takes about a second
       - name: Find the workflows this pull request affects
         id: affected
         run: |
