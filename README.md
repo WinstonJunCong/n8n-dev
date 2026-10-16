@@ -46,6 +46,8 @@ It loads one `[test] ...` workflow per test file into a sealed local n8n. Open `
 
 On the canvas, a coloured backdrop marks what the test **simulates**: the fake incoming event, and the fake reply from each outside service. Everything without a backdrop is your real workflow logic, running for real. You can poke at it, change a condition, or add nodes to see what happens.
 
+**Without a terminal to keep open** (for a script, or an assistant driving it for you): add `--detach`. The command prints the address and login and returns, leaving the chamber running. When you are done, run `node harness/n8n-dev.mjs ui-stop`: it saves your edits, removes the chamber and prints what you changed, exactly as Ctrl+C does. Starting a new chamber while one is running is refused, so unsaved edits are never thrown away by accident.
+
 **The chamber is sealed:**
 - **No way out.** n8n runs on an internal Docker network with no route to the internet or your local network, for every node, including Code nodes.
 - **Your files are not in it.** The repo is not mounted. n8n only sees its own throwaway storage.

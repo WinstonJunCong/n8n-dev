@@ -5,6 +5,8 @@
 //   n8n-dev test      <workflow-dir> [--workflow-file f.json]   run YAML tests with every outside step faked
 //   n8n-dev check     <workflow-dir> [--workflow-file f.json]   all three + markdown/JSON report (what CI runs)
 //   n8n-dev ui        <workflow-dir> [--port 5678]              the faked tests in a sealed local n8n editor (needs Docker)
+//   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
+//   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
 //   n8n-dev pull      [<workflow-dir>] [--apply] [--force]      bring edits saved in that editor back into workflow.json (dry run unless --apply)
 // The n8n CLI is taken from $N8N_CMD (default "n8n"). Each run uses a fresh, throwaway n8n data folder,
 // so nothing touches a real n8n, real credentials or real services.
@@ -15,6 +17,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { buildPlan, describeOps } from "./pull.mjs";
+import { startVerdict, savedSince } from "./session.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG = JSON.parse(fs.readFileSync(path.join(ROOT, "config/readiness.json"), "utf8"));
@@ -247,6 +250,11 @@ function openUi(wf) {
     console.error("ui needs Docker, because the sealed chamber runs in it. Install Docker Desktop and try again.");
     process.exit(1);
   }
+  // Starting a chamber replaces any existing one, and with it any unsaved edits. Refuse instead of doing that
+  // silently. (Exit 1 = something is there; 2 = could not tell, which the start itself will report.)
+  const running = spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, encoding: "utf8" });
+  const verdict = startVerdict(running.status);
+  if (verdict.refuse) { console.error(verdict.message); process.exit(1); }
   const varDir = freshDir("ui-variants");
   const exportDir = freshDir("ui-export");
   const slug = path.basename(wfDir).replace(/[^a-z0-9]/gi, "").slice(0, 8);
@@ -265,6 +273,16 @@ function openUi(wf) {
     workflowDir: rel(wfDir), workflowFile: rel(wfFile), realHash: createHash("sha256").update(JSON.stringify(wf)).digest("hex"),
     variantsDir: rel(varDir), exportDir: rel(exportDir), variants, createdAt: new Date().toISOString(),
   }, null, 2));
+  // --detach: bring the chamber up and return, for callers that cannot keep a terminal open (an assistant, a script).
+  // It stays running until `ui-stop`, which saves any edits and removes it.
+  if (args.includes("--detach")) {
+    const started = spawnSync(`bash ./scripts/n8n-chamber.sh start ${JSON.stringify(rel(varDir))}`, {
+      shell: SHELL, cwd: ROOT, stdio: "inherit",
+      env: { ...process.env, N8N_VERSION, N8N_PORT: port, MSYS_NO_PATHCONV: "1" },
+    });
+    if (started.status === 0) console.log("\nThe chamber is running. To save any edits and close it:  node harness/n8n-dev.mjs ui-stop");
+    process.exit(started.status ?? 1);
+  }
   // Ctrl+C reaches this process as well as the chamber script. Ignore it here so the script can save and clean up,
   // and so this process is still alive to print the summary afterwards.
   process.on("SIGINT", () => {});
@@ -273,18 +291,27 @@ function openUi(wf) {
     shell: SHELL, cwd: ROOT, stdio: "inherit",
     env: { ...process.env, N8N_VERSION, N8N_PORT: port, MSYS_NO_PATHCONV: "1" },
   });
-  // Flag what the person changed, so they know whether there is anything to pull back.
-  try {
-    const plan = loadPlan();
-    if (!plan.error) {
-      console.log();
-      printPlan(plan);
-      if (plan.ops.length) console.log(`\nTo bring this into ${plan.manifest.workflowFile}:  node harness/n8n-dev.mjs pull ${plan.manifest.workflowDir}`);
-    }
-  } catch (e) { console.error("Could not summarise your edits: " + e.message); }
+  printEditSummary();
   // Confirm nothing is left running. Exit code: 0 = clean, 1 = leftovers, 2 = could not check.
   const left = spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" });
   process.exit(left.status ?? 2);
+}
+
+// ---------- ui-stop: save the edits from a chamber started with `ui --detach`, then remove it ----------
+function runUiStop() {
+  const file = path.join(WORK, "ui-manifest.json");
+  if (!fs.existsSync(file)) { console.error("No chamber session found. Start one with `n8n-dev ui <workflow-dir> --detach`."); return 2; }
+  const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+  const began = Date.now();
+  const stopped = spawnSync(`bash ./scripts/n8n-chamber.sh stop ${JSON.stringify(manifest.exportDir)}`, {
+    shell: SHELL, cwd: ROOT, stdio: "inherit", env: { ...process.env, N8N_VERSION, MSYS_NO_PATHCONV: "1" },
+  });
+  // Only summarise if this stop actually saved something; otherwise the export folder holds an older session.
+  const dir = path.resolve(ROOT, manifest.exportDir);
+  const exported = fs.existsSync(dir) ? fs.readdirSync(dir).map((f) => ({ mtimeMs: fs.statSync(path.join(dir, f)).mtimeMs })) : [];
+  if (savedSince(exported, began)) printEditSummary();
+  else console.log("\nNo chamber was running, so nothing was saved.");
+  return stopped.status ?? 2;
 }
 
 // ---------- 5. pull: bring edits made in the chamber back into workflow.json ----------
@@ -320,6 +347,17 @@ function printPlan(plan) {
   if (plan.skipped.length) { console.log("Not applied:"); plan.skipped.forEach((s) => console.log("  - " + s.detail)); }
   if (plan.warnings.length) { console.log("Notes:"); plan.warnings.forEach((w) => console.log("  ! " + w)); }
   if (plan.missing.length) console.log(`The chamber did not save: ${plan.missing.join(", ")}`);
+}
+
+// What the person changed in the chamber, and how to bring it into workflow.json. Used when a chamber closes.
+function printEditSummary() {
+  try {
+    const plan = loadPlan();
+    if (plan.error) return;
+    console.log();
+    printPlan(plan);
+    if (plan.ops.length) console.log(`\nTo bring this into ${plan.manifest.workflowFile}:  node harness/n8n-dev.mjs pull ${plan.manifest.workflowDir}`);
+  } catch (e) { console.error("Could not summarise your edits: " + e.message); }
 }
 
 function runPull() {
@@ -387,8 +425,9 @@ function report(wf, s, st, tests) {
 // ---------- main ----------
 if (cmd === "init") { (await import("./init.mjs")).init(ROOT, args.slice(1)); process.exit(0); }
 if (cmd === "pull") process.exit(runPull());
+if (cmd === "ui-stop") process.exit(runUiStop());
 if (!["scan", "structure", "test", "check", "ui"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678]");
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach]\n   or: n8n-dev ui-stop");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
