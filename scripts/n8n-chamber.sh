@@ -2,7 +2,7 @@
 # n8n chamber: a sealed local n8n editor for playing with FAKED workflows.
 #   ./scripts/n8n-chamber.sh proof   start the chamber, run the safety checks, tear it down
 #   ./scripts/n8n-chamber.sh up [dir]   start the chamber and leave it running (dir = faked workflows to load)
-#   ./scripts/n8n-chamber.sh run <dir>  load the faked workflows, start, wait; Ctrl+C removes everything
+#   ./scripts/n8n-chamber.sh run <dir> [export-dir]  load the faked workflows, start, wait; on Ctrl+C save any edits to export-dir, then remove everything
 #   ./scripts/n8n-chamber.sh down       remove it (containers, network and its data), then report status
 #   ./scripts/n8n-chamber.sh status     report whether anything is left: prints CLEAN (exit 0) or LEFTOVERS (exit 1)
 #
@@ -12,15 +12,16 @@
 #   DISK your repo is NOT mounted. n8n only sees its own throwaway volume.
 # Everything is deleted on `down`, so nothing typed into the editor survives.
 set -u
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1   # run from the repo root so relative paths mean the same everywhere
 export MSYS_NO_PATHCONV=1                      # stop Git Bash on Windows rewriting /paths
 IMAGE="n8nio/n8n:${N8N_VERSION:-2.43.4}"
 PORT="${N8N_PORT:-5678}"
-NET=n8n-chamber-net; APP=n8n-chamber-app; FWD=n8n-chamber-fwd; VOL=n8n-chamber-data; IMP=n8n-chamber-import
+NET=n8n-chamber-net; APP=n8n-chamber-app; FWD=n8n-chamber-fwd; VOL=n8n-chamber-data; IMP=n8n-chamber-import; EXP=n8n-chamber-export
 # Nodes that can run commands or touch files. One list, used by the editor and by the proof, so they cannot drift apart.
 EXCLUDE='["n8n-nodes-base.executeCommand","n8n-nodes-base.readWriteFile","n8n-nodes-base.localFileTrigger"]'
 
 down() {
-  docker rm -f "$FWD" "$APP" "$IMP" >/dev/null 2>&1
+  docker rm -f "$FWD" "$APP" "$IMP" "$EXP" >/dev/null 2>&1
   docker network rm "$NET" >/dev/null 2>&1
   docker volume rm "$VOL" >/dev/null 2>&1
   return 0
@@ -41,6 +42,32 @@ status() {
 }
 
 cleanup() { down; status; }
+
+# Saves the workflows as they are NOW, including edits made in the editor, to a folder on this machine. The editor
+# is stopped first so its database is flushed, then a short-lived container with NO network does the export and
+# the files are copied out. This is the only thing that ever leaves the chamber, and only when asked.
+export_edits() {
+  local dest="$1" out rc
+  mkdir -p "$dest" || return 1
+  docker stop -t 20 "$APP" >/dev/null 2>&1
+  docker create --name "$EXP" --network none --cap-drop ALL --security-opt no-new-privileges \
+    -v "$VOL":/home/node/.n8n -e N8N_DIAGNOSTICS_ENABLED=false -e N8N_RUNNERS_ENABLED=true \
+    --entrypoint sh "$IMAGE" -c 'mkdir -p /tmp/export && n8n export:workflow --all --separate --output=/tmp/export' >/dev/null || return 1
+  out=$(docker start -a "$EXP" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then docker cp "$EXP":/tmp/export/. "$dest" >/dev/null 2>&1; rc=$?; fi
+  docker rm -f "$EXP" >/dev/null 2>&1
+  if [ "$rc" -ne 0 ]; then echo "Could not export the edited workflows:"; echo "$out" | tail -5; return 1; fi
+  return 0
+}
+
+# Used when `run` ends (Ctrl+C): save the edited copies if asked, then always remove everything.
+finish() {
+  if [ -n "${EXPORT_TO:-}" ] && docker inspect "$APP" >/dev/null 2>&1; then
+    if export_edits "$EXPORT_TO"; then echo "Saved the workflows, with any edits you made and saved, to $EXPORT_TO"
+    else echo "Your edits could not be saved; removing the chamber anyway."; fi
+  fi
+  cleanup
+}
 
 up() {
   down
@@ -107,9 +134,15 @@ proof() {
   local pass=0 fail=0 inconclusive=0
   ok()  { echo "PASS: $1"; pass=$((pass + 1)); }
   bad() { echo "FAIL: $1"; fail=$((fail + 1)); }
-  trap cleanup EXIT
+  # A tiny known workflow to load, so the export round trip can be checked at the end.
+  local fx=".n8n-dev/proof-fixture" ex=".n8n-dev/proof-export"
+  trap "rm -rf '$fx' '$ex'; cleanup" EXIT          # expanded now: $fx and $ex are gone by the time the trap runs
+  rm -rf "$fx" "$ex"; mkdir -p "$fx"
+  cat > "$fx/proofroundtrip01.json" <<'JSON'
+{"id":"proofroundtrip01","name":"proof round trip","active":false,"nodes":[{"id":"n1","name":"Start","type":"n8n-nodes-base.manualTrigger","typeVersion":1,"position":[0,0],"parameters":{}}],"connections":{}}
+JSON
   echo "Starting the chamber (image $IMAGE)..."
-  up || { echo "Could not start the chamber. Is Docker Desktop running and the image pulled?"; exit 1; }
+  up "$fx" || { echo "Could not start the chamber. Is Docker Desktop running and the image pulled?"; exit 1; }
 
   if wait_ready; then ok "editor answers at http://127.0.0.1:$PORT through the forwarder"
   else bad "editor did not answer within 90 seconds"; fi
@@ -156,6 +189,12 @@ proof() {
   if echo "$ports" | grep -q '127.0.0.1' && ! echo "$ports" | grep -q '0.0.0.0'; then ok "the forwarder is published on 127.0.0.1 only"
   else bad "the forwarder is published beyond loopback: $ports"; fi
 
+  # Last on purpose: exporting stops the editor. The workflow loaded at the start must come back out of the
+  # chamber intact, or edits made in it could never be pulled back.
+  if export_edits "$ex" && grep -q '"name": *"proof round trip"' "$ex/proofroundtrip01.json" 2>/dev/null; then
+    ok "a workflow loaded into the chamber can be exported back out"
+  else bad "the workflow loaded into the chamber could not be exported back out"; fi
+
   echo
   down
   local after
@@ -166,8 +205,9 @@ proof() {
 }
 
 run() {
-  [ -n "${1:-}" ] || { echo "usage: n8n-chamber.sh run <dir-of-faked-workflows>"; return 2; }
-  trap cleanup EXIT
+  [ -n "${1:-}" ] || { echo "usage: n8n-chamber.sh run <dir-of-faked-workflows> [export-dir]"; return 2; }
+  EXPORT_TO="${2:-}"
+  trap finish EXIT
   trap 'echo; echo "Stopping the chamber..."; exit 0' INT TERM
   echo "Starting the chamber (image $IMAGE)..."
   up "$1" || { echo "Could not start the chamber. Is Docker Desktop running and the image pulled?"; return 1; }
@@ -185,15 +225,15 @@ run() {
     echo "Open http://127.0.0.1:$PORT  (the first visit asks you to create a throwaway local account)"
     echo "(could not create it automatically; n8n said: $OWNER_REPLY)"
   fi
-  echo "Open a \"[test] ...\" workflow and click Execute workflow. Press Ctrl+C to stop and delete everything."
+  echo "Open a \"[test] ...\" workflow and click Execute workflow. Edit and SAVE (Ctrl+S) to keep a change. Press Ctrl+C to save your edits to a folder and delete the chamber."
   sleep 2147483647 & wait $!
 }
 
 case "${1:-}" in
   proof) proof ;;
-  run)   run "${2:-}" ;;
+  run)   run "${2:-}" "${3:-}" ;;
   up)    up "${2:-}" && wait_ready && echo "Chamber is up: http://127.0.0.1:$PORT   (stop it with: ./scripts/n8n-chamber.sh down)" ;;
   down)  down; echo "Chamber removed."; status ;;
   status) status ;;
-  *)     echo "usage: n8n-chamber.sh <proof|run <dir>|up [dir]|down|status>"; exit 2 ;;
+  *)     echo "usage: n8n-chamber.sh <proof|run <dir> [export-dir]|up [dir]|down|status>"; exit 2 ;;
 esac

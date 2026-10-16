@@ -88,6 +88,23 @@ test("n8n re-saving an untouched node with an empty options object is not a chan
   assert.deepEqual(patch(e).ops, []);
 });
 
+test("n8n adding an empty default string inside an IF node is not a change (seen on a real export)", () => {
+  const e = base();
+  byId(e, "i").parameters = { value: "ok", conditions: { options: { caseSensitive: true, leftValue: "", version: 2 } } };
+  const b = base();
+  byId(b, "i").parameters = { value: "ok", conditions: { options: { caseSensitive: true, version: 2 } } };
+  const p = computePatch({ base: b, edited: e, simulatedIds: SIMULATED });
+  assert.deepEqual(p.ops, []);
+});
+
+test("changing a value to an empty string on purpose IS a change", () => {
+  const e = base();
+  byId(e, "s").parameters = { text: "" };
+  const p = patch(e);
+  assert.equal(p.ops.length, 1);
+  assert.equal(p.ops[0].op, "set");
+});
+
 // ---------- editing real nodes ----------
 test("editing a real node is applied and leaves the rest untouched", () => {
   const e = base();
