@@ -31,6 +31,7 @@ export function init(root, args) {
     // Every file in harness/ and scripts/, not a hand-kept list: the harness imports its own helper files, so a
     // missing one breaks every command in the new repo.
     ...copyFolder(root, "harness"),
+    ...copyFolder(root, "mcp"),
     ...copyFolder(root, "scripts", (s) => s.replace(/2\.43\.4/g, version)),
     ...sampleWorkflow(root, dir),
     ".gitignore": "node_modules/\n.n8n-dev/\n",

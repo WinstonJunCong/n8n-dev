@@ -19,22 +19,25 @@ const generate = () => {
 };
 const filesIn = (dir) => fs.readdirSync(dir, { withFileTypes: true }).filter((f) => f.isFile()).map((f) => f.name).sort();
 
-test("a generated repo has every harness and script file", () => {
+test("a generated repo has every harness, mcp and script file", () => {
   const target = generate();
   try {
-    assert.deepEqual(filesIn(path.join(target, "harness")), filesIn(path.join(ROOT, "harness")));
-    assert.deepEqual(filesIn(path.join(target, "scripts")), filesIn(path.join(ROOT, "scripts")));
+    for (const folder of ["harness", "mcp", "scripts"]) {
+      assert.deepEqual(filesIn(path.join(target, folder)), filesIn(path.join(ROOT, folder)), `${folder}/ differs in the generated repo`);
+    }
   } finally { fs.rmSync(target, { recursive: true, force: true }); }
 });
 
-test("every relative import in the generated harness resolves", () => {
+test("every relative import in the generated harness and mcp folders resolves", () => {
   const target = generate();
   try {
-    const dir = path.join(target, "harness");
-    for (const file of filesIn(dir).filter((f) => f.endsWith(".mjs"))) {
-      const source = fs.readFileSync(path.join(dir, file), "utf8");
-      for (const m of source.matchAll(/(?:from|import\()\s*["'](\.[^"']+)["']/g)) {
-        assert.ok(fs.existsSync(path.join(dir, m[1])), `${file} imports ${m[1]}, which is missing in the generated repo`);
+    for (const folder of ["harness", "mcp"]) {
+      const dir = path.join(target, folder);
+      for (const file of filesIn(dir).filter((f) => f.endsWith(".mjs"))) {
+        const source = fs.readFileSync(path.join(dir, file), "utf8");
+        for (const m of source.matchAll(/(?:from|import\()\s*["'](\.[^"']+)["']/g)) {
+          assert.ok(fs.existsSync(path.join(dir, m[1])), `${folder}/${file} imports ${m[1]}, which is missing in the generated repo`);
+        }
       }
     }
   } finally { fs.rmSync(target, { recursive: true, force: true }); }
@@ -44,7 +47,7 @@ test("the generated package.json test script points at files that exist", () => 
   const target = generate();
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(target, "package.json"), "utf8"));
-    for (const f of pkg.scripts.test.match(/harness\/[\w.-]+\.mjs/g) || []) {
+    for (const f of pkg.scripts.test.match(/(?:harness|mcp)\/[\w.-]+\.mjs/g) || []) {
       assert.ok(fs.existsSync(path.join(target, f)), `npm test refers to ${f}, which is missing in the generated repo`);
     }
   } finally { fs.rmSync(target, { recursive: true, force: true }); }
@@ -65,7 +68,8 @@ test("the generated repo's own unit tests pass inside it", {
 }, () => {
   const target = generate();
   try {
-    const tests = filesIn(path.join(target, "harness")).filter((f) => f.endsWith(".test.mjs")).map((f) => `harness/${f}`);
+    const tests = ["harness", "mcp"].flatMap((folder) =>
+      filesIn(path.join(target, folder)).filter((f) => f.endsWith(".test.mjs")).map((f) => `${folder}/${f}`));
     // NODE_TEST_CONTEXT is set by the outer test runner. If it were inherited, the inner `node --test` would not act
     // as a runner and would exit 0 even when tests fail (a false pass).
     const env = { ...process.env, N8N_DEV_NESTED_TEST: "1" };
