@@ -20,7 +20,10 @@ const cli = (...args) => run(process.execPath, ["harness/n8n-dev.mjs", ...args])
 const chamber = (...args) => run("bash", ["./scripts/n8n-chamber.sh", ...args]);
 
 before(() => {
-  assert.equal(chamber("status").status, 0, "A chamber is already running. Run `bash ./scripts/n8n-chamber.sh down` first.");
+  const s = chamber("status");
+  assert.equal(s.status, 0,
+    `A chamber is already running (or something from one is left over), so this test will not start.\n${s.out}\n` +
+    "Close it with Ctrl+C in the window where it runs, or remove it with `bash ./scripts/n8n-chamber.sh down`, then run the test again.");
 });
 after(() => { chamber("down"); });   // always clean up, even when a step fails
 
@@ -31,6 +34,9 @@ test("ui --detach returns, prints the address and the login, and leaves the cham
   assert.match(r.out, /test@test\.com/);
   assert.match(r.out, /ui-stop/);
   assert.equal(chamber("status").status, 1, "the chamber should be running now");
+  const viaCli = cli("status");                              // the same question through the command line the server uses
+  assert.equal(viaCli.status, 1, viaCli.out);
+  assert.match(viaCli.out, /LEFTOVERS/);
 });
 
 test("a second start is refused while one is running, and the first keeps running", () => {
@@ -57,6 +63,9 @@ test("ui-stop saves the workflows, summarises them, and removes everything", () 
   const saved = fs.readdirSync(path.join(ROOT, ".n8n-dev/ui-export")).filter((f) => f.endsWith(".json"));
   assert.equal(saved.length, 3, `expected one saved copy per test, found: ${saved.join(", ")}`);
   assert.equal(chamber("status").status, 0, "nothing should be left behind");
+  const cleanViaCli = cli("status");
+  assert.equal(cleanViaCli.status, 0, cleanViaCli.out);
+  assert.match(cleanViaCli.out, /CLEAN/);
 });
 
 test("ui-stop with nothing running says so, saves nothing, and still reports clean", () => {

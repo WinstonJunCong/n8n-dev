@@ -79,3 +79,26 @@ export function makeCodeStore({ ttlMs = 10 * 60 * 1000, maxTries = 3, now = Date
     },
   };
 }
+
+// Checks the arguments of a tool call against a small spec and rejects everything else: unknown keys, wrong types,
+// missing required values, and anything that is not a plain object. `spec` maps each allowed key to
+// { type: "string" | "any", required?: boolean }. Returns { value } (only the allowed keys) or { error }.
+export function strictArgs(args, spec) {
+  const given = args === undefined || args === null ? {} : args;
+  if (typeof given !== "object" || Array.isArray(given)) return { error: "The arguments must be an object." };
+  const allowed = new Set(Object.keys(spec));
+  for (const key of Object.keys(given)) {
+    if (!allowed.has(key)) return { error: `Unexpected argument "${key}". Allowed: ${[...allowed].join(", ") || "none"}.` };
+  }
+  const value = {};
+  for (const [key, rule] of Object.entries(spec)) {
+    const v = Object.prototype.hasOwnProperty.call(given, key) ? given[key] : undefined;
+    if (v === undefined || v === null) {
+      if (rule.required) return { error: `Missing required argument "${key}".` };
+      continue;
+    }
+    if (rule.type === "string" && typeof v !== "string") return { error: `The argument "${key}" must be text.` };
+    value[key] = v;
+  }
+  return { value };
+}
