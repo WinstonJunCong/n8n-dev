@@ -54,7 +54,7 @@ On the canvas, a coloured backdrop marks what the test **simulates**: the fake i
 
 Never paste a real key or password into it. The login it creates is a fake local one.
 
-**Keeping a change you made in the editor.** Edit and **save** (Ctrl+S) in the editor. When you press Ctrl+C, the chamber saves your workflows to `.n8n-dev/ui-export`, prints what you changed, and deletes itself. To bring those changes into `workflow.json`:
+**Keeping a change you made in the editor.** Edit in the editor. n8n saves automatically about a second and a half after you stop changing things (Ctrl+S saves at once), so wait a couple of seconds after your last change. When you press Ctrl+C, the chamber saves your workflows to `.n8n-dev/ui-export`, prints what you changed, and deletes itself. To bring those changes into `workflow.json`:
 
 ```bash
 node harness/n8n-dev.mjs pull workflows/site-health-alert           # shows what would change; writes nothing

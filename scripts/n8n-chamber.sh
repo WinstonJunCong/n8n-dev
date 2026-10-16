@@ -225,7 +225,7 @@ run() {
     echo "Open http://127.0.0.1:$PORT  (the first visit asks you to create a throwaway local account)"
     echo "(could not create it automatically; n8n said: $OWNER_REPLY)"
   fi
-  echo "Open a \"[test] ...\" workflow and click Execute workflow. Edit and SAVE (Ctrl+S) to keep a change. Press Ctrl+C to save your edits to a folder and delete the chamber."
+  echo "Open a \"[test] ...\" workflow and click Execute workflow. Changes save automatically a moment after you stop editing; wait a couple of seconds, then press Ctrl+C to save your edits to a folder and delete the chamber."
   sleep 2147483647 & wait $!
 }
 

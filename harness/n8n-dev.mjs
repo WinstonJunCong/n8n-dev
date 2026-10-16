@@ -265,6 +265,10 @@ function openUi(wf) {
     workflowDir: rel(wfDir), workflowFile: rel(wfFile), realHash: createHash("sha256").update(JSON.stringify(wf)).digest("hex"),
     variantsDir: rel(varDir), exportDir: rel(exportDir), variants, createdAt: new Date().toISOString(),
   }, null, 2));
+  // Ctrl+C reaches this process as well as the chamber script. Ignore it here so the script can save and clean up,
+  // and so this process is still alive to print the summary afterwards.
+  process.on("SIGINT", () => {});
+  process.on("SIGTERM", () => {});
   spawnSync(`bash ./scripts/n8n-chamber.sh run ${JSON.stringify(rel(varDir))} ${JSON.stringify(rel(exportDir))}`, {
     shell: SHELL, cwd: ROOT, stdio: "inherit",
     env: { ...process.env, N8N_VERSION, N8N_PORT: port, MSYS_NO_PATHCONV: "1" },
