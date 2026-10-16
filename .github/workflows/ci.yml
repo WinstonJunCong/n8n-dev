@@ -1,5 +1,8 @@
 # CI: runs on every pull request. A red check blocks the merge
 # (turn on "Require status checks to pass" for the main branch in GitHub settings).
+# It first works out which workflows the pull request affects. If none, it finishes in seconds and skips the slow
+# parts (installing packages, pulling the n8n image, running tests). The job still reports success, so a required
+# check is never left waiting on a README-only change.
 name: n8n checks
 on:
   pull_request:
@@ -11,26 +14,40 @@ jobs:
         with: { fetch-depth: 0 }          # full history, so we can see what this pull request changed
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
-      - run: npm ci
+      - name: Find the workflows this pull request affects
+        id: affected
+        run: |
+          dirs=$(node harness/changed.mjs "origin/${{ github.base_ref }}")
+          printf '%s\n' "$dirs" > "$RUNNER_TEMP/affected.txt"
+          if [ -z "$dirs" ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "No workflows affected by this change, so nothing to test." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+            echo "Testing: $(echo $dirs)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.affected.outputs.any == 'true'
+        run: npm ci
       - name: Reuse the n8n node list from earlier runs
+        if: steps.affected.outputs.any == 'true'
         uses: actions/cache@v4
         with:
           path: .n8n-dev/nodes-2.43.4.json
           key: n8n-nodes-2.43.4
-      - run: docker pull -q n8nio/n8n:2.43.4
+      - if: steps.affected.outputs.any == 'true'
+        run: docker pull -q n8nio/n8n:2.43.4
       - name: Readiness scan, structure check and fake tests (changed workflows + their callers)
+        if: steps.affected.outputs.any == 'true'
         env:
           N8N_CMD: bash ./scripts/n8n-docker.sh
         run: |
           status=0
-          dirs=$(node harness/changed.mjs "origin/${{ github.base_ref }}")
-          if [ -z "$dirs" ]; then echo "No workflows affected by this change." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
-          for d in $dirs; do
+          for d in $(cat "$RUNNER_TEMP/affected.txt"); do
             n=$(basename "$d")
             node harness/n8n-dev.mjs check "$d" --report "reports/$n.md" || status=1
             cat "reports/$n.md" >> "$GITHUB_STEP_SUMMARY"
           done
           exit $status
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.affected.outputs.any == 'true'
         with: { name: n8n-dev-reports, path: reports/ }
