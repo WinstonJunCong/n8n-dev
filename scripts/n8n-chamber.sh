@@ -2,6 +2,8 @@
 # n8n chamber: a sealed local n8n editor for playing with FAKED workflows.
 #   ./scripts/n8n-chamber.sh proof   start the chamber, run the safety checks, tear it down
 #   ./scripts/n8n-chamber.sh up [dir]   start the chamber and leave it running (dir = faked workflows to load)
+#   ./scripts/n8n-chamber.sh start <dir>             like run, but returns once the editor is ready and leaves it running
+#   ./scripts/n8n-chamber.sh stop [export-dir]       save the workflows (with any edits) to export-dir and remove everything
 #   ./scripts/n8n-chamber.sh run <dir> [export-dir]  load the faked workflows, start, wait; on Ctrl+C save any edits to export-dir, then remove everything
 #   ./scripts/n8n-chamber.sh down       remove it (containers, network and its data), then report status
 #   ./scripts/n8n-chamber.sh status     report whether anything is left: prints CLEAN (exit 0) or LEFTOVERS (exit 1)
@@ -135,8 +137,8 @@ proof() {
   ok()  { echo "PASS: $1"; pass=$((pass + 1)); }
   bad() { echo "FAIL: $1"; fail=$((fail + 1)); }
   # A tiny known workflow to load, so the export round trip can be checked at the end.
-  local fx=".n8n-dev/proof-fixture" ex=".n8n-dev/proof-export"
-  trap "rm -rf '$fx' '$ex'; cleanup" EXIT          # expanded now: $fx and $ex are gone by the time the trap runs
+  local fx=".n8n-dev/proof-fixture" ex=".n8n-dev/proof-export" lc=".n8n-dev/proof-lifecycle"
+  trap "rm -rf '$fx' '$ex' '$lc'; cleanup" EXIT    # expanded now: these variables are gone by the time the trap runs
   rm -rf "$fx" "$ex"; mkdir -p "$fx"
   cat > "$fx/proofroundtrip01.json" <<'JSON'
 {"id":"proofroundtrip01","name":"proof round trip","active":false,"nodes":[{"id":"n1","name":"Start","type":"n8n-nodes-base.manualTrigger","typeVersion":1,"position":[0,0],"parameters":{}}],"connections":{}}
@@ -195,6 +197,22 @@ JSON
     ok "a workflow loaded into the chamber can be exported back out"
   else bad "the workflow loaded into the chamber could not be exported back out"; fi
 
+  # The start / stop pair is how an assistant drives the chamber, since it cannot hold a terminal open. `start`
+  # replaces the chamber above with a fresh one; the throwaway login is only ever checked here.
+  rm -rf "$lc"
+  local running code
+  start "$fx" >/dev/null 2>&1
+  running=$(docker inspect -f '{{.State.Running}}' "$APP" 2>/dev/null)
+  if [ "$running" = "true" ]; then ok "start returns and leaves the chamber running"
+  else bad "start did not leave a running chamber"; fi
+  code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -d '{"emailOrLdapLoginId":"test@test.com","password":"Test1234"}' "http://127.0.0.1:${PORT}/rest/login")
+  if [ "$code" = "200" ]; then ok "the throwaway login test@test.com / Test1234 works"
+  else bad "the throwaway login was rejected (HTTP $code)"; fi
+  if stop "$lc" >/dev/null 2>&1 && grep -q '"name": *"proof round trip"' "$lc/proofroundtrip01.json" 2>/dev/null; then
+    ok "stop saves the workflows and removes everything"
+  else bad "stop did not save the workflows and clean up"; fi
+
   echo
   down
   local after
@@ -204,11 +222,9 @@ JSON
   [ "$fail" -eq 0 ] && [ "$inconclusive" -eq 0 ]
 }
 
-run() {
-  [ -n "${1:-}" ] || { echo "usage: n8n-chamber.sh run <dir-of-faked-workflows> [export-dir]"; return 2; }
-  EXPORT_TO="${2:-}"
-  trap finish EXIT
-  trap 'echo; echo "Stopping the chamber..."; exit 0' INT TERM
+# Starts the chamber and RETURNS, leaving it running. `run` calls this and then waits for Ctrl+C; `start` calls it
+# for callers that cannot hold a terminal open (an assistant, for example). Prints the address and the login.
+start_chamber() {
   echo "Starting the chamber (image $IMAGE)..."
   up "$1" || { echo "Could not start the chamber. Is Docker Desktop running and the image pulled?"; return 1; }
   wait_ready || { echo "The editor did not start. Logs: docker logs $APP"; return 1; }
@@ -225,15 +241,38 @@ run() {
     echo "Open http://127.0.0.1:$PORT  (the first visit asks you to create a throwaway local account)"
     echo "(could not create it automatically; n8n said: $OWNER_REPLY)"
   fi
+}
+
+run() {
+  [ -n "${1:-}" ] || { echo "usage: n8n-chamber.sh run <dir-of-faked-workflows> [export-dir]"; return 2; }
+  EXPORT_TO="${2:-}"
+  trap finish EXIT
+  trap 'echo; echo "Stopping the chamber..."; exit 0' INT TERM
+  start_chamber "$1" || return 1
   echo "Open a \"[test] ...\" workflow and click Execute workflow. Changes save automatically a moment after you stop editing; wait a couple of seconds, then press Ctrl+C to save your edits to a folder and delete the chamber."
   sleep 2147483647 & wait $!
+}
+
+# start / stop: the same chamber without a terminal to hold open. `start` returns once the editor is ready and
+# leaves it running; `stop` saves the workflows (with any edits) to <export-dir> and removes everything.
+start() {
+  [ -n "${1:-}" ] || { echo "usage: n8n-chamber.sh start <dir-of-faked-workflows>"; return 2; }
+  start_chamber "$1" || { cleanup; return 1; }
+  echo "READY http://127.0.0.1:$PORT"
+}
+
+stop() {
+  EXPORT_TO="${1:-}"
+  finish
 }
 
 case "${1:-}" in
   proof) proof ;;
   run)   run "${2:-}" "${3:-}" ;;
+  start) start "${2:-}" ;;
+  stop)  stop "${2:-}" ;;
   up)    up "${2:-}" && wait_ready && echo "Chamber is up: http://127.0.0.1:$PORT   (stop it with: ./scripts/n8n-chamber.sh down)" ;;
   down)  down; echo "Chamber removed."; status ;;
   status) status ;;
-  *)     echo "usage: n8n-chamber.sh <proof|run <dir> [export-dir]|up [dir]|down|status>"; exit 2 ;;
+  *)     echo "usage: n8n-chamber.sh <proof|run <dir> [export-dir]|start <dir>|stop [export-dir]|up [dir]|down|status>"; exit 2 ;;
 esac
