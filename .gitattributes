@@ -1,0 +1,2 @@
+# Shell scripts must keep Unix line endings. With Windows line endings, bash fails with a confusing "\r: command not found" error.
+*.sh text eol=lf
