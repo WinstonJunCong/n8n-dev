@@ -19,10 +19,25 @@ test("the core (harness/) never imports from mcp/", () => {
   }
 });
 
+test("only effects.mjs may start a process or touch the disk; the rules and the tools stay free of both", () => {
+  for (const { file, text } of sources("mcp", (f) => !f.endsWith(".test.mjs") && f !== "effects.mjs")) {
+    const code = stripComments(text);
+    assert.ok(!/node:child_process|["']child_process["']/.test(code), `${file} imports child_process`);
+    assert.ok(!/from\s*["'](?:node:)?fs(?:\/promises)?["']/.test(code), `${file} imports fs`);
+  }
+});
+
+test("effects.mjs starts programs only with an argument list and shell: false", () => {
+  const code = stripComments(fs.readFileSync(path.join(ROOT, "mcp/effects.mjs"), "utf8"));
+  assert.match(code, /shell:\s*false/);
+  assert.ok(!/\bexec(?:Sync|File|FileSync)?\s*\(/.test(code), "effects.mjs must use spawn only");
+  assert.ok(!/\bspawnSync\b/.test(code), "effects.mjs must not block the server");
+});
+
 test("mcp/ never runs shell strings: no exec, no shell option, no eval", () => {
   const forbidden = [
     [/\bexec(?:Sync|File|FileSync)?\s*\(/, "exec / execSync / execFile"],
-    [/shell\s*:\s*(?!false\b)/, "a shell option other than false"],
+    [/\bshell\s*:\s*(?!false\b)\S/, "a shell option other than false"],   // the trailing \S stops backtracking from flagging `shell: false`
     [/\beval\s*\(/, "eval"],
     [/\bnew\s+Function\s*\(/, "new Function"],
   ];

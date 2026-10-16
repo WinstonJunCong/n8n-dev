@@ -1,7 +1,7 @@
 // Unit tests for mcp/guards.mjs. Run with: npm test   (no Docker needed)
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isValidWorkflowName, resolveWorkflow, pickPort, truncate, hashOf, makeRateLimiter, makeCodeStore } from "./guards.mjs";
+import { isValidWorkflowName, resolveWorkflow, pickPort, truncate, hashOf, makeRateLimiter, makeCodeStore, strictArgs } from "./guards.mjs";
 
 // ---------- workflow names ----------
 test("ordinary workflow names are accepted", () => {
@@ -150,4 +150,30 @@ test("codes for different subjects are independent", () => {
   const a = store.issue("a"), b = store.issue("b");
   assert.ok(store.redeem(a, "a").ok);
   assert.ok(store.redeem(b, "b").ok);
+});
+
+// ---------- strictArgs ----------
+
+test("strictArgs accepts exactly the allowed keys and returns only those", () => {
+  assert.deepEqual(strictArgs({ workflow: "a" }, { workflow: { type: "string", required: true } }), { value: { workflow: "a" } });
+  assert.deepEqual(strictArgs({}, { port: { type: "any" } }), { value: {} });
+  assert.deepEqual(strictArgs(undefined, {}), { value: {} });
+  assert.deepEqual(strictArgs(null, {}), { value: {} });
+  assert.deepEqual(strictArgs({ port: 8080 }, { port: { type: "any" } }), { value: { port: 8080 } });
+});
+
+test("strictArgs rejects unknown keys, including prototype tricks", () => {
+  const spec = { workflow: { type: "string", required: true } };
+  for (const bad of [{ workflow: "a", extra: 1 }, { workflow: "a", __proto__x: 1 }, { workflow: "a", constructor: 1 }, { workflow: "a", toString: 1 }]) {
+    assert.ok(strictArgs(bad, spec).error, JSON.stringify(bad));
+  }
+  assert.ok(strictArgs(JSON.parse('{"workflow":"a","__proto__":{"x":1}}'), spec).error);
+});
+
+test("strictArgs rejects missing required values, wrong types, and arguments that are not an object", () => {
+  const spec = { workflow: { type: "string", required: true } };
+  assert.match(strictArgs({}, spec).error, /Missing required argument "workflow"/);
+  assert.match(strictArgs({ workflow: null }, spec).error, /Missing required/);
+  for (const v of [1, true, ["a"], { a: 1 }]) assert.match(strictArgs({ workflow: v }, spec).error, /must be text/, JSON.stringify(v));
+  for (const bad of ["text", 5, true, ["a"]]) assert.match(strictArgs(bad, spec).error, /must be an object/, JSON.stringify(bad));
 });

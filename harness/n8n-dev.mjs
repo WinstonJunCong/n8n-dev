@@ -7,6 +7,7 @@
 //   n8n-dev ui        <workflow-dir> [--port 5678]              the faked tests in a sealed local n8n editor (needs Docker)
 //   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
 //   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
+//   n8n-dev status                                              is a sealed editor still open? (0 clean, 1 something is there, 2 unknown)
 //   n8n-dev pull      [<workflow-dir>] [--apply] [--force]      bring edits saved in that editor back into workflow.json (dry run unless --apply)
 // The n8n CLI is taken from $N8N_CMD (default "n8n"). Each run uses a fresh, throwaway n8n data folder,
 // so nothing touches a real n8n, real credentials or real services.
@@ -426,8 +427,11 @@ function report(wf, s, st, tests) {
 if (cmd === "init") { (await import("./init.mjs")).init(ROOT, args.slice(1)); process.exit(0); }
 if (cmd === "pull") process.exit(runPull());
 if (cmd === "ui-stop") process.exit(runUiStop());
+if (cmd === "status") {   // is a sealed editor still open? Exit 0 = clean, 1 = something is there, 2 = could not tell
+  process.exit(spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" }).status ?? 2);
+}
 if (!["scan", "structure", "test", "check", "ui"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach]\n   or: n8n-dev ui-stop");
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach]\n   or: n8n-dev ui-stop | status");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
