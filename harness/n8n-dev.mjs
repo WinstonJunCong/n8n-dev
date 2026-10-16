@@ -5,6 +5,7 @@
 //   n8n-dev test      <workflow-dir> [--workflow-file f.json]   run YAML tests with every outside step faked
 //   n8n-dev check     <workflow-dir> [--workflow-file f.json]   all three + markdown/JSON report (what CI runs)
 //   n8n-dev ui        <workflow-dir> [--port 5678]              the faked tests in a sealed local n8n editor (needs Docker)
+//   n8n-dev pull      [<workflow-dir>] [--apply] [--force]      bring edits saved in that editor back into workflow.json (dry run unless --apply)
 // The n8n CLI is taken from $N8N_CMD (default "n8n"). Each run uses a fresh, throwaway n8n data folder,
 // so nothing touches a real n8n, real credentials or real services.
 import fs from "node:fs";
@@ -13,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { buildPlan, describeOps } from "./pull.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG = JSON.parse(fs.readFileSync(path.join(ROOT, "config/readiness.json"), "utf8"));
@@ -267,9 +269,92 @@ function openUi(wf) {
     shell: SHELL, cwd: ROOT, stdio: "inherit",
     env: { ...process.env, N8N_VERSION, N8N_PORT: port, MSYS_NO_PATHCONV: "1" },
   });
+  // Flag what the person changed, so they know whether there is anything to pull back.
+  try {
+    const plan = loadPlan();
+    if (!plan.error) {
+      console.log();
+      printPlan(plan);
+      if (plan.ops.length) console.log(`\nTo bring this into ${plan.manifest.workflowFile}:  node harness/n8n-dev.mjs pull ${plan.manifest.workflowDir}`);
+    }
+  } catch (e) { console.error("Could not summarise your edits: " + e.message); }
   // Confirm nothing is left running. Exit code: 0 = clean, 1 = leftovers, 2 = could not check.
   const left = spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" });
   process.exit(left.status ?? 2);
+}
+
+// ---------- 5. pull: bring edits made in the chamber back into workflow.json ----------
+// Only changes to REAL nodes are applied (see merge.mjs). Dry run unless --apply. It refuses if the edited copies
+// disagree, if workflow.json changed while the chamber was open, or if the result would fail the readiness scan.
+function newNodeWarnings(n) {
+  const out = [];
+  if (isOutside(n)) out.push(`New outside step "${n.name}": add a mock for it in the tests, and read its address from ${CONFIG.configHint || "your config"} instead of typing it in.`);
+  if (isTrigger(n)) out.push(`New trigger "${n.name}": a workflow must have exactly one trigger.`);
+  return out;
+}
+
+function loadPlan() {
+  const file = path.join(WORK, "ui-manifest.json");
+  if (!fs.existsSync(file)) return { error: "No chamber session found. Run `n8n-dev ui <workflow-dir>` first." };
+  const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+  const abs = (p) => path.resolve(ROOT, p);
+  const plan = buildPlan({
+    manifest,
+    readJson: (p) => JSON.parse(fs.readFileSync(abs(p), "utf8")),
+    exists: (p) => fs.existsSync(abs(p)),
+    isSimulated: (n) => isTrigger(n) || isOutside(n),
+    warnForNew: newNodeWarnings,
+  });
+  return { manifest, ...plan };
+}
+
+function printPlan(plan) {
+  const lines = describeOps(plan);
+  if (!lines.length && !plan.skipped.length && !plan.warnings.length) { console.log("No changes to pull: the edited copies match what was loaded."); return; }
+  if (lines.length) { console.log("Changes you made to your workflow:"); lines.forEach((l) => console.log("  + " + l)); }
+  else console.log("Nothing to apply to workflow.json.");
+  if (plan.skipped.length) { console.log("Not applied:"); plan.skipped.forEach((s) => console.log("  - " + s.detail)); }
+  if (plan.warnings.length) { console.log("Notes:"); plan.warnings.forEach((w) => console.log("  ! " + w)); }
+  if (plan.missing.length) console.log(`The chamber did not save: ${plan.missing.join(", ")}`);
+}
+
+function runPull() {
+  const plan = loadPlan();
+  if (plan.error) { console.error(plan.error); return 2; }
+  const given = args[1] && !args[1].startsWith("--") ? rel(path.resolve(args[1])) : null;
+  if (given && given !== plan.manifest.workflowDir) {
+    console.error(`The last chamber session was for ${plan.manifest.workflowDir}, not ${given}.`);
+    return 2;
+  }
+  printPlan(plan);
+  if (plan.conflicts.length) {
+    console.error("\nConflicts: the edited copies disagree, so nothing can be applied:");
+    plan.conflicts.forEach((c) => console.error("  x " + c.detail));
+    return 1;
+  }
+  if (!plan.ops.length) return 0;
+  if (plan.drift && !args.includes("--force")) {
+    console.error(`\nRefusing: ${plan.manifest.workflowFile} changed after the chamber opened, so these edits may not fit it any more.\nRun ui again, or add --force if you know it is safe.`);
+    return 1;
+  }
+  const findings = scan(plan.merged);
+  if (findings.length) {
+    console.error("\nRefusing: the result would fail the readiness scan, so nothing was written:");
+    findings.forEach((f) => console.error(`  x ${f.node} (${f.where}): ${f.message}`));
+    return 1;
+  }
+  if (!args.includes("--apply")) {
+    console.log(`\nDry run: nothing was changed. Re-run with --apply to update ${plan.manifest.workflowFile}.`);
+    return 0;
+  }
+  try {
+    fs.writeFileSync(path.resolve(ROOT, plan.manifest.workflowFile), JSON.stringify(plan.merged, null, 2) + "\n");
+  } catch (e) {
+    console.error(`\nCould not write ${plan.manifest.workflowFile}: ${e.message}`);
+    return 1;
+  }
+  console.log(`\nUpdated ${plan.manifest.workflowFile}. Next: run check, look at git diff, then open a pull request.`);
+  return 0;
 }
 
 // ---------- report ----------
@@ -297,8 +382,9 @@ function report(wf, s, st, tests) {
 
 // ---------- main ----------
 if (cmd === "init") { (await import("./init.mjs")).init(ROOT, args.slice(1)); process.exit(0); }
+if (cmd === "pull") process.exit(runPull());
 if (!["scan", "structure", "test", "check", "ui"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678]");
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678]");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
