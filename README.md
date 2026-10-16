@@ -42,7 +42,7 @@ Without Docker, install n8n with npm and leave `N8N_CMD` unset.
 node harness/n8n-dev.mjs ui workflows/site-health-alert
 ```
 
-It loads one `[test] ...` workflow per test file into a sealed local n8n and prints a sign-in. Open the address it shows (`http://127.0.0.1:5678`), open a workflow, and click **Execute workflow** to watch the data move through each step. Press **Ctrl+C** to stop. Use `--port 5679` to change the port.
+It loads one `[test] ...` workflow per test file into a sealed local n8n. Open `http://127.0.0.1:5678` and sign in with `test@test.com` / `Test1234` (a throwaway local account the command creates for you; if the page shows a sign-up form instead, refresh the tab). Open a workflow, and click **Execute workflow** to watch the data move through each step. Press **Ctrl+C** to stop. Use `--port 5679` to change the port.
 
 On the canvas, a coloured backdrop marks what the test **simulates**: the fake incoming event, and the fake reply from each outside service. Everything without a backdrop is your real workflow logic, running for real. You can poke at it, change a condition, or add nodes to see what happens.
 
@@ -52,7 +52,7 @@ On the canvas, a coloured backdrop marks what the test **simulates**: the fake i
 - **One window in.** A small forwarder container publishes the editor on `127.0.0.1` only, so nothing else on your network can reach it.
 - **Throwaway.** Everything, including the local login, is deleted when you stop it. The execute-command and file read/write nodes are switched off.
 
-Never paste a real key or password into it. The login it creates is a fake local one.
+Never paste a real key or password into it. The `test@test.com` login is fake and only works inside that one chamber.
 
 **Keeping a change you made in the editor.** Edit in the editor. n8n saves automatically about a second and a half after you stop changing things (Ctrl+S saves at once), so wait a couple of seconds after your last change. When you press Ctrl+C, the chamber saves your workflows to `.n8n-dev/ui-export`, prints what you changed, and deletes itself. To bring those changes into `workflow.json`:
 

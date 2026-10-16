@@ -118,7 +118,7 @@ create_owner() {
   local reply
   for _ in $(seq 1 20); do
     reply=$(curl -s -m 10 -X POST -H 'Content-Type: application/json' \
-      -d '{"email":"chamber@example.com","firstName":"Chamber","lastName":"User","password":"Chamber1234"}' \
+      -d '{"email":"test@test.com","firstName":"Chamber","lastName":"User","password":"Test1234"}' \
       -w ' [HTTP %{http_code}]' "http://127.0.0.1:${PORT}/rest/owner/setup" 2>&1)
     case "$reply" in *"[HTTP 200]"*|*"[HTTP 201]"*) return 0 ;; esac
     sleep 1
@@ -219,7 +219,7 @@ run() {
   # Create the throwaway owner account so there is no sign-up form. Local only, deleted with the chamber.
   OWNER_REPLY=""
   if create_owner; then
-    echo "Open http://127.0.0.1:$PORT and sign in with:  chamber@example.com  /  Chamber1234"
+    echo "Open http://127.0.0.1:$PORT and sign in with:  test@test.com  /  Test1234"
     echo "(a throwaway local login; it is deleted with the chamber. If the page still shows sign-up, refresh the tab.)"
   else
     echo "Open http://127.0.0.1:$PORT  (the first visit asks you to create a throwaway local account)"
