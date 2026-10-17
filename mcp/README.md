@@ -31,7 +31,7 @@ It is a **thin, guarded wrapper over the same command line** you can run yoursel
 | `list_workflows` | Lists the workflows in the repo, with their test counts |
 | `check_workflow` | Runs the readiness scan, structure check and fake tests; returns the report |
 | `ui_start` | Opens the sealed editor with the faked tests loaded; returns the address and login |
-| `ui_stop` | Saves any edits, closes the editor, and summarises what changed |
+| `ui_stop` | Only when the person says they are finished (their words are required, and not within 30 s of opening): saves any edits, closes the editor, and summarises what changed |
 | `status` | Says whether a sealed editor is still open |
 | `pull_preview` | Shows which edits would be applied to `workflow.json`; changes nothing |
 | `pull_apply` | Applies them, only with the one-time code from a preview of the same content |
