@@ -14,8 +14,9 @@ jobs:
         with: { fetch-depth: 0 }          # full history, so we can see what this pull request changed
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
+      - run: npm ci                       # the unit tests need the installed packages (the MCP server's tests start the server)
       - name: Unit tests for the harness
-        run: npm test                     # runs on every pull request: it needs no install and takes about a second
+        run: npm test                     # runs on every pull request
       - name: Find the workflows this pull request affects
         id: affected
         run: |
@@ -28,8 +29,6 @@ jobs:
             echo "any=true" >> "$GITHUB_OUTPUT"
             echo "Testing: $(echo $dirs)" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
-      - if: steps.affected.outputs.any == 'true'
-        run: npm ci
       - name: Reuse the n8n node list from earlier runs
         if: steps.affected.outputs.any == 'true'
         uses: actions/cache@v4
