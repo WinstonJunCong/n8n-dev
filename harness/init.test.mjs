@@ -90,3 +90,13 @@ test("the generated CI is this repo's CI, and it runs the unit tests", () => {
     assert.match(theirs, /Find the workflows this pull request affects/);
   } finally { fs.rmSync(target, { recursive: true, force: true }); }
 });
+
+test("CI installs the packages before it runs the unit tests (the MCP server's tests need them)", () => {
+  const ci = fs.readFileSync(path.join(ROOT, ".github/workflows/ci.yml"), "utf8");
+  const install = ci.indexOf("run: npm ci");
+  const tests = ci.indexOf("run: npm test");
+  assert.ok(install !== -1, "ci.yml has no `npm ci` step");
+  assert.ok(tests !== -1, "ci.yml has no `npm test` step");
+  assert.ok(install < tests, "`npm ci` must come before `npm test`");
+  assert.equal(ci.split("run: npm ci").length - 1, 1, "install once, not twice");
+});
