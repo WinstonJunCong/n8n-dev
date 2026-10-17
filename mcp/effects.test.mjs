@@ -66,6 +66,15 @@ test("the runner starts the harness with exactly the given arguments, from the r
   assert.match(r.out, /on stderr/);                    // standard error is captured too
 });
 
+test("the runner keeps standard output and standard error apart, and together in out", async () => {
+  const r = await makeRunner({ root: makeRepo() })(["check", "workflows/demo"]);
+  assert.match(r.stdout, /"args"/);
+  assert.doesNotMatch(r.stdout, /on stderr/);
+  assert.match(r.stderr, /on stderr/);
+  assert.doesNotMatch(r.stderr, /"args"/);
+  assert.match(r.out, /"args"[\s\S]*on stderr|on stderr[\s\S]*"args"/);
+});
+
 test("an argument that looks like a shell command is passed through as plain text and never run", async () => {
   const root = makeRepo();
   const runCli = makeRunner({ root });

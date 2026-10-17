@@ -21,9 +21,10 @@ const SERVER_INFO = { name: "n8n-dev", version: "0.1.0" };
 // Guidance for the assistant, delivered when it connects.
 const INSTRUCTIONS = [
   "You help someone change n8n workflows safely, without touching the live n8n. Nothing here contacts a live n8n or any outside service.",
-  "Start with list_workflows. Use check_workflow to run the safety checks and tests, and explain the result in plain words.",
-  "Use ui_start so the person can see what a workflow does and try a change in a sealed editor that cannot reach the internet or their files. Give them the address and the login it returns, and call ui_stop when they are done.",
-  "Use pull_preview to show what they changed. Describe the changes in plain words and ask them to confirm before you call pull_apply with the code. Never apply anything the person has not seen and agreed to.",
+  "The person is not technical. Talk in plain words: steps, tests, checks, 'the safe test editor'. Never mention commands, file or folder names, flags, Docker internals or other technical terms. Never ask the person to run a command, edit a file or open a terminal: you do everything yourself through these tools. If a tool's reply has a part marked as for you, the assistant, do not read that part out.",
+  "Start with list_workflows. Use check_workflow to run the safety checks and tests, and pass on the result in plain words.",
+  "Use ui_start so the person can see what a workflow does and try a change in a safe test editor that cannot reach the internet or their files. Give them the address and the sign-in it returns, and call ui_stop when they say they are done.",
+  "Use pull_preview to show what they changed, as the exact before-and-after text. Ask them to confirm before you call pull_apply with the code. Never apply anything the person has not seen and agreed to.",
 ].join("\n\n");
 
 // The repository this server works on: the one it lives in, or the one named by N8N_DEV_ROOT.

@@ -8,6 +8,7 @@
 //   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
 //   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
 //   n8n-dev status                                              is a sealed editor still open? (0 clean, 1 something is there, 2 unknown)
+//   --json (on check, pull, ui --detach, ui-stop)               print the facts as one JSON object, for programs such as the MCP server
 //   n8n-dev pull      [<workflow-dir>] [--apply] [--force]      bring edits saved in that editor back into workflow.json (dry run unless --apply)
 // The n8n CLI is taken from $N8N_CMD (default "n8n"). Each run uses a fresh, throwaway n8n data folder,
 // so nothing touches a real n8n, real credentials or real services.
@@ -17,7 +18,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { buildPlan, describeOps } from "./pull.mjs";
+import { buildPlan, describeOps, planToJson, decidePull } from "./pull.mjs";
 import { startVerdict, savedSince } from "./session.mjs";
 import { findBash } from "./shell.mjs";
 
@@ -243,20 +244,26 @@ function decorateForUi(v, wf) {
 }
 
 function openUi(wf) {
+  // `--detach --json` prints ONE JSON object describing what happened, and nothing else, for programs (the MCP server).
+  const asJson = args.includes("--detach") && args.includes("--json");
+  const bail = (code, state, message) => {
+    if (asJson) console.log(JSON.stringify({ state, message }));
+    else console.error(message);
+    process.exit(code);
+  };
   const testDir = path.join(wfDir, "tests");
   const files = fs.existsSync(testDir) ? fs.readdirSync(testDir).filter((f) => /\.ya?ml$/.test(f)).sort() : [];
-  if (!files.length) { console.error("No tests found under " + testDir); process.exit(1); }
+  if (!files.length) bail(1, "no-tests", "No tests found under " + testDir);
   const port = flag("--port") || "5678";
-  if (!/^\d{2,5}$/.test(port)) { console.error(`--port must be a number, got "${port}"`); process.exit(2); }
+  if (!/^\d{2,5}$/.test(port)) bail(2, "bad-port", `--port must be a number, got "${port}"`);
   if (spawnSync("docker --version", { shell: SHELL, encoding: "utf8" }).status !== 0) {
-    console.error("ui needs Docker, because the sealed chamber runs in it. Install Docker Desktop and try again.");
-    process.exit(1);
+    bail(1, "docker-missing", "ui needs Docker, because the sealed chamber runs in it. Install Docker Desktop and try again.");
   }
   // Starting a chamber replaces any existing one, and with it any unsaved edits. Refuse instead of doing that
   // silently. (Exit 1 = something is there; 2 = could not tell, which the start itself will report.)
   const running = spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, encoding: "utf8" });
   const verdict = startVerdict(running.status);
-  if (verdict.refuse) { console.error(verdict.message); process.exit(1); }
+  if (verdict.refuse) bail(1, "already-running", verdict.message);
   const varDir = freshDir("ui-variants");
   const exportDir = freshDir("ui-export");
   const slug = path.basename(wfDir).replace(/[^a-z0-9]/gi, "").slice(0, 8);
@@ -268,7 +275,7 @@ function openUi(wf) {
       fs.writeFileSync(path.join(varDir, `${id}.json`), JSON.stringify(decorateForUi(buildVariant(wf, test, id), wf)));
       variants.push({ id, test: test.test });
     });
-  } catch (e) { console.error("Could not build the faked copies: " + e.message); process.exit(1); }
+  } catch (e) { bail(1, "build-failed", "Could not build the faked copies: " + e.message); }
   // Kept outside variantsDir on purpose: that folder is imported into n8n as-is. `pull` uses this to know which
   // workflow the copies came from and to notice if workflow.json changed while the chamber was open.
   fs.writeFileSync(path.join(WORK, "ui-manifest.json"), JSON.stringify({
@@ -279,9 +286,19 @@ function openUi(wf) {
   // It stays running until `ui-stop`, which saves any edits and removes it.
   if (args.includes("--detach")) {
     const started = spawnSync(`bash ./scripts/n8n-chamber.sh start ${JSON.stringify(rel(varDir))}`, {
-      shell: SHELL, cwd: ROOT, stdio: "inherit",
+      shell: SHELL, cwd: ROOT, stdio: asJson ? ["ignore", "pipe", "pipe"] : "inherit", encoding: "utf8",
       env: { ...process.env, N8N_VERSION, N8N_PORT: port, MSYS_NO_PATHCONV: "1" },
     });
+    if (asJson) {
+      const out = `${started.stdout || ""}${started.stderr || ""}`;
+      const address = out.match(/READY (\S+)/)?.[1];
+      const login = out.match(/sign in with:\s+(\S+)\s+\/\s+(\S+)/);
+      const ok = started.status === 0 && address;
+      console.log(JSON.stringify(ok
+        ? { state: "started", address, login: login ? { email: login[1], password: login[2] } : null, workflow: rel(wfDir) }
+        : { state: "failed", message: "The sealed editor did not start.", details: out.trim().slice(-400) }));
+      process.exit(ok ? 0 : 1);
+    }
     if (started.status === 0) console.log("\nThe chamber is running. To save any edits and close it:  node harness/n8n-dev.mjs ui-stop");
     process.exit(started.status ?? 1);
   }
@@ -301,17 +318,30 @@ function openUi(wf) {
 
 // ---------- ui-stop: save the edits from a chamber started with `ui --detach`, then remove it ----------
 function runUiStop() {
+  const asJson = args.includes("--json");   // one JSON object and nothing else, for programs (the MCP server)
   const file = path.join(WORK, "ui-manifest.json");
-  if (!fs.existsSync(file)) { console.error("No chamber session found. Start one with `n8n-dev ui <workflow-dir> --detach`."); return 2; }
+  if (!fs.existsSync(file)) {
+    if (asJson) console.log(JSON.stringify({ state: "no-session" }));
+    else console.error("No chamber session found. Start one with `n8n-dev ui <workflow-dir> --detach`.");
+    return 2;
+  }
   const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
   const began = Date.now();
   const stopped = spawnSync(`bash ./scripts/n8n-chamber.sh stop ${JSON.stringify(manifest.exportDir)}`, {
-    shell: SHELL, cwd: ROOT, stdio: "inherit", env: { ...process.env, N8N_VERSION, MSYS_NO_PATHCONV: "1" },
+    shell: SHELL, cwd: ROOT, stdio: asJson ? ["ignore", "pipe", "pipe"] : "inherit", encoding: "utf8",
+    env: { ...process.env, N8N_VERSION, MSYS_NO_PATHCONV: "1" },
   });
   // Only summarise if this stop actually saved something; otherwise the export folder holds an older session.
   const dir = path.resolve(ROOT, manifest.exportDir);
   const exported = fs.existsSync(dir) ? fs.readdirSync(dir).map((f) => ({ mtimeMs: fs.statSync(path.join(dir, f)).mtimeMs })) : [];
-  if (savedSince(exported, began)) printEditSummary();
+  const saved = savedSince(exported, began);
+  if (asJson) {
+    let summary = null;
+    if (saved) { try { const plan = loadPlan(); if (!plan.error) summary = { workflow: plan.manifest.workflowDir, ...planToJson(plan) }; } catch { /* reported as no summary */ } }
+    console.log(JSON.stringify({ state: saved ? "saved" : "nothing-running", cleaned: stopped.status === 0, summary }));
+    return stopped.status ?? 2;
+  }
+  if (saved) printEditSummary();
   else console.log("\nNo chamber was running, so nothing was saved.");
   return stopped.status ?? 2;
 }
@@ -363,40 +393,56 @@ function printEditSummary() {
 }
 
 function runPull() {
+  const asJson = args.includes("--json");   // one JSON object and nothing else, for programs (the MCP server)
+  const out = (obj, code) => { console.log(JSON.stringify(obj)); return code; };
   const plan = loadPlan();
-  if (plan.error) { console.error(plan.error); return 2; }
+  if (plan.error) return asJson ? out({ state: "no-session" }, 2) : (console.error(plan.error), 2);
   const given = args[1] && !args[1].startsWith("--") ? rel(path.resolve(args[1])) : null;
   if (given && given !== plan.manifest.workflowDir) {
+    if (asJson) return out({ state: "wrong-workflow", expected: plan.manifest.workflowDir, given }, 2);
     console.error(`The last chamber session was for ${plan.manifest.workflowDir}, not ${given}.`);
     return 2;
   }
-  printPlan(plan);
-  if (plan.conflicts.length) {
+  const findings = scan(plan.merged);
+  const decision = decidePull({ plan, apply: args.includes("--apply"), force: args.includes("--force"), findings });
+  const facts = { workflow: plan.manifest.workflowDir, ...planToJson(plan) };
+  if (asJson && decision.state !== "apply") {
+    const blocked = decision.state === "blocked";
+    return out({
+      state: decision.state,
+      ...(blocked ? { reason: decision.reason } : {}),
+      ...(decision.findings ? { findings: decision.findings.map((f) => ({ node: f.node, rule: f.rule, message: f.message })) } : {}),
+      ...facts,
+    }, blocked ? 1 : 0);
+  }
+  if (!asJson) printPlan(plan);
+  if (decision.state === "blocked" && decision.reason === "conflict") {
     console.error("\nConflicts: the edited copies disagree, so nothing can be applied:");
     plan.conflicts.forEach((c) => console.error("  x " + c.detail));
     return 1;
   }
-  if (!plan.ops.length) return 0;
-  if (plan.drift && !args.includes("--force")) {
+  if (decision.state === "nothing") return 0;
+  if (decision.state === "blocked" && decision.reason === "changed-meanwhile") {
     console.error(`\nRefusing: ${plan.manifest.workflowFile} changed after the chamber opened, so these edits may not fit it any more.\nRun ui again, or add --force if you know it is safe.`);
     return 1;
   }
-  const findings = scan(plan.merged);
-  if (findings.length) {
+  if (decision.state === "blocked") {
     console.error("\nRefusing: the result would fail the readiness scan, so nothing was written:");
     findings.forEach((f) => console.error(`  x ${f.node} (${f.where}): ${f.message}`));
     return 1;
   }
-  if (!args.includes("--apply")) {
+  if (decision.state === "ready") {
     console.log(`\nDry run: nothing was changed. Re-run with --apply to update ${plan.manifest.workflowFile}.`);
     return 0;
   }
   try {
     fs.writeFileSync(path.resolve(ROOT, plan.manifest.workflowFile), JSON.stringify(plan.merged, null, 2) + "\n");
   } catch (e) {
+    if (asJson) return out({ state: "write-failed", message: e.message, ...facts }, 1);
     console.error(`\nCould not write ${plan.manifest.workflowFile}: ${e.message}`);
     return 1;
   }
+  if (asJson) return out({ state: "applied", ...facts }, 0);
   console.log(`\nUpdated ${plan.manifest.workflowFile}. Next: run check, look at git diff, then open a pull request.`);
   return 0;
 }
@@ -432,7 +478,7 @@ if (cmd === "status") {   // is a sealed editor still open? Exit 0 = clean, 1 = 
   process.exit(spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" }).status ?? 2);
 }
 if (!["scan", "structure", "test", "check", "ui"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach]\n   or: n8n-dev ui-stop | status");
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | status");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
@@ -441,7 +487,8 @@ const s =["scan", "check"].includes(cmd) ? scan(wf) : null;
 const st = ["structure", "check"].includes(cmd) ? structure(wf) : null;
 const tests = ["test", "check"].includes(cmd) ? runTests(wf) : null;
 const { allPass, md } = report(wf, s, st, tests);
-console.log(md);
+// --json prints the facts as one JSON object (for programs such as the MCP server) instead of the readable report.
+console.log(args.includes("--json") ? JSON.stringify({ allPass, workflow: rel(wfDir), scan: s, structure: st, tests }) : md);
 const out = flag("--report");
 if (out) { fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true }); fs.writeFileSync(out, md); fs.writeFileSync(out.replace(/\.md$/, ".json"), JSON.stringify({ allPass, scan: s, structure: st, tests }, null, 2)); }
 process.exit(allPass ? 0 : 1);

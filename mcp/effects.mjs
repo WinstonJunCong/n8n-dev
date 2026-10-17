@@ -23,7 +23,7 @@ export function makeFs(root) {
 
 // Runs the n8n-dev command line with a fixed list of arguments. Never a shell, never a string to be split: each
 // argument reaches the program exactly as given, so nothing in it can act as a command. Resolves to
-// { status, out, timedOut }; it never rejects.
+// { status, out, stdout, stderr, timedOut } (out = both together); it never rejects.
 export function makeRunner({ root, nodePath = process.execPath, defaultTimeoutMs = 10 * 60 * 1000, maxOutput = 2_000_000 }) {
   const base = path.resolve(root);
   return function runCli(args, { timeoutMs = defaultTimeoutMs, env = {} } = {}) {
@@ -34,16 +34,16 @@ export function makeRunner({ root, nodePath = process.execPath, defaultTimeoutMs
           cwd: base, shell: false, windowsHide: true,
           env: { ...process.env, ...env, MSYS_NO_PATHCONV: "1" },
         });
-      } catch (e) { resolve({ status: null, out: `Could not start n8n-dev: ${e.message}`, timedOut: false }); return; }
-      let out = "";
-      const add = (d) => { out += d; if (out.length > maxOutput) out = out.slice(-maxOutput); };   // keep the end, where the result is
-      child.stdout.on("data", add);
-      child.stderr.on("data", add);
+      } catch (e) { const m = `Could not start n8n-dev: ${e.message}`; resolve({ status: null, out: m, stdout: "", stderr: m, timedOut: false }); return; }
+      let out = "", stdout = "", stderr = "";
+      const keep = (s, d) => { s += d; return s.length > maxOutput ? s.slice(-maxOutput) : s; };   // keep the end, where the result is
+      child.stdout.on("data", (d) => { out = keep(out, d); stdout = keep(stdout, d); });
+      child.stderr.on("data", (d) => { out = keep(out, d); stderr = keep(stderr, d); });
       let done = false;
       const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve(r); } };
-      const timer = setTimeout(() => { child.kill(); finish({ status: null, out: `${out}\n[stopped: it took longer than ${Math.round(timeoutMs / 1000)} seconds]`, timedOut: true }); }, timeoutMs);
-      child.on("error", (e) => finish({ status: null, out: `Could not start n8n-dev: ${e.message}`, timedOut: false }));
-      child.on("close", (code) => finish({ status: code, out, timedOut: false }));
+      const timer = setTimeout(() => { child.kill(); finish({ status: null, out: `${out}\n[stopped: it took longer than ${Math.round(timeoutMs / 1000)} seconds]`, stdout, stderr, timedOut: true }); }, timeoutMs);
+      child.on("error", (e) => { const m = `Could not start n8n-dev: ${e.message}`; finish({ status: null, out: m, stdout: "", stderr: m, timedOut: false }); });
+      child.on("close", (code) => finish({ status: code, out, stdout, stderr, timedOut: false }));
     });
   };
 }
