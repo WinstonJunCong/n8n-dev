@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JARGON, describeChanges, describeNotApplied, plainAssertion,
-  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForStatus,
+  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForPreview, replyForApply, replyForStatus,
 } from "./replies.mjs";
 
 // The part of a reply meant for the person: without the line for the assistant and the support details.
@@ -208,6 +208,7 @@ const everyReply = () => {
   for (const state of ["already-running", "docker-missing", "no-tests", "bad-port", "build-failed", "failed", "x"]) out.push(replyForStart({ state, details: "docker: command not found" }));
   out.push(replyForStart({ state: "started", address: "http://127.0.0.1:5678", login: { email: "a@b.c", password: "p" } }));
   out.push(replyForStopRefused("too-soon"), replyForStopRefused("no-words"));
+  for (const state of ["restored", "no-words", "nothing-to-undo", "already-undone", "changed-since", "missing", "write-failed", "other"]) out.push(replyForUndo({ state, changes: rich.changes }));
   for (const j of [{ state: "saved", cleaned: true, summary: rich }, { state: "saved", cleaned: false, summary: FACTS }, { state: "nothing-running" }, { state: "no-session" }]) out.push(replyForStop(j));
   for (const reason of ["conflict", "changed-meanwhile", "scan", "other"]) { out.push(replyForPreview({ state: "blocked", reason, findings: scanFinding, ...rich }, undefined)); out.push(replyForApply({ state: "blocked", reason, ...rich })); }
   out.push(replyForPreview({ state: "ready", ...rich }, "123456"), replyForPreview({ state: "nothing", ...rich, changes: [] }), replyForPreview({ state: "no-session" }), replyForPreview({ state: "wrong-workflow", expected: "a", given: "b" }));
@@ -247,4 +248,26 @@ test("control: the assistant-only part is the only place tool names appear", () 
   const r = replyForPreview({ state: "ready", ...FACTS }, "123456");
   assert.match(r.text, /pull_apply/);
   assert.doesNotMatch(forPerson(r.text), /pull_apply|check_workflow|ui_stop/);
+});
+
+// ---------- undo ----------
+test("undo says what was taken back, in plain words, for every kind of change", () => {
+  const lines = describeUndone([
+    ...CHANGES, { kind: "changed", node: "A", details: [] }, { kind: "renamed", node: "B", to: "C" }, { kind: "added", node: "D" },
+    { kind: "removed", node: "E" }, { kind: "connected", from: "F", to: "G" }, { kind: "disconnected", from: "H", to: "I" },
+  ]);
+  assert.equal(lines[0], "In “Compose alert”, the text is back to “ALERT: down” (it had been changed to “TEST: down”)");
+  assert.match(lines[2], /“C” is called “B” again/);
+  assert.match(lines[3], /“D” was taken out again/);
+  assert.match(lines[4], /“E” was put back/);
+  assert.match(lines[5], /“F” is no longer connected to “G”/);
+  assert.match(lines[6], /“H” is connected to “I” again/);
+});
+
+test("each undo outcome has a plain reply, and only real failures are errors", () => {
+  assert.match(replyForUndo({ state: "restored", changes: CHANGES }).text, /Done\. Your workflow is back/);
+  assert.match(replyForUndo({ state: "changed-since" }).text, /changed again since/);
+  assert.match(replyForUndo({ state: "no-words" }).text, /Say the word/);
+  for (const state of ["already-undone", "nothing-to-undo"]) assert.equal(replyForUndo({ state }).isError, false, state);
+  for (const state of ["changed-since", "missing", "write-failed", "no-words", "other"]) assert.equal(replyForUndo({ state }).isError, true, state);
 });

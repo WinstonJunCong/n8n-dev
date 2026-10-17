@@ -145,10 +145,43 @@ export function replyForApply(j) {
     const lines = describeChanges(j.changes);
     return reply(
       `Done. Your change is now in the workflow ${q(j.workflow.split("/").pop())}.${lines.length ? `\n\n${bullets(lines)}` : ""}\n\nI'd run the checks again before anything else.`,
-      "call check_workflow now");
+      "call check_workflow now. If the checks now fail, tell the person plainly which test failed and why, and offer to undo the change with undo_change");
   }
   if (j.state === "write-failed") return reply("I couldn't save the change to your workflow. Nothing was changed.", undefined, true);
   return replyForPreview(j);
+}
+
+// ---------- undo ----------
+// What an undo takes back, said from the person's side (the saved changes describe what the apply did).
+export function describeUndone(changes = []) {
+  const lines = [];
+  for (const c of changes) {
+    if (c.kind === "changed") {
+      if (c.details?.length) for (const d of c.details) lines.push(`In ${q(c.node)}, the ${d.label} is back to ${q(d.from)} (it had been changed to ${q(d.to)})`);
+      else lines.push(`${q(c.node)} is back as it was`);
+    } else if (c.kind === "renamed") lines.push(`${q(c.to)} is called ${q(c.node)} again`);
+    else if (c.kind === "added") lines.push(`The step ${q(c.node)} was taken out again`);
+    else if (c.kind === "removed") lines.push(`The step ${q(c.node)} was put back`);
+    else if (c.kind === "connected") lines.push(`${q(c.from)} is no longer connected to ${q(c.to)}`);
+    else if (c.kind === "disconnected") lines.push(`${q(c.from)} is connected to ${q(c.to)} again`);
+  }
+  return lines;
+}
+
+export function replyForUndo(j) {
+  if (j.state === "restored") {
+    const lines = describeUndone(j.changes);
+    return reply(`Done. Your workflow is back to how it was before the change.${lines.length ? `\n\n${bullets(lines)}` : ""}`, "call check_workflow to confirm it is healthy again");
+  }
+  const plain = {
+    "no-words": "I didn't undo anything, because I need you to tell me you want to go back. Say the word and I'll do it.",
+    "nothing-to-undo": "There is nothing to undo: no change has been applied that I can take back.",
+    "already-undone": "Your workflow is already back to how it was before the change.",
+    "changed-since": "I can't undo this safely: the workflow has been changed again since that change was applied, and going back would throw away that newer work.",
+    missing: "I can't undo this: the workflow I would restore can't be found.",
+    "write-failed": "I couldn't put the workflow back. Nothing was changed.",
+  }[j.state] ?? "I couldn't undo that.";
+  return reply(plain, undefined, !["already-undone", "nothing-to-undo"].includes(j.state));
 }
 
 // ---------- checks and status ----------
