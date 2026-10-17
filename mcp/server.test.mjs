@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = path.join(ROOT, "mcp", "server.mjs");
-const TOOLS = ["check_workflow", "list_workflows", "pull_apply", "pull_preview", "status", "ui_start", "ui_stop"];
+const TOOLS = ["check_workflow", "list_workflows", "pull_apply", "pull_preview", "status", "ui_start", "ui_stop", "undo_change"];
 
 // A minimal client: one server process, one JSON message per line each way.
 class Client {
@@ -92,7 +92,7 @@ describe("legacy era (initialize handshake)", () => {
       assert.equal(t.inputSchema.additionalProperties, false, `${t.name} must reject unknown arguments`);
       assert.equal(t.annotations.openWorldHint, false, t.name);
     }
-    assert.deepEqual(r.result.tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name), ["pull_apply"]);
+    assert.deepEqual(r.result.tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["pull_apply", "undo_change"]);
   });
 
   test("tools/call list_workflows returns the real workflows", async () => {

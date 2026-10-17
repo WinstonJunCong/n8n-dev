@@ -61,7 +61,7 @@ const BAD_NAMES = ["../etc", "..", "a/b", "a\\b", "/abs", "a b", "", "x;rm -rf",
 // ---------- the tools as a set ----------
 test("every tool has a name, a plain description, a strict schema and annotations", () => {
   const { tools } = build();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "list_workflows", "pull_apply", "pull_preview", "status", "ui_start", "ui_stop"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "list_workflows", "pull_apply", "pull_preview", "status", "ui_start", "ui_stop", "undo_change"]);
   for (const t of tools) {
     assert.ok(t.description.length > 30, t.name);
     assert.equal(t.inputSchema.type, "object", t.name);
@@ -71,9 +71,9 @@ test("every tool has a name, a plain description, a strict schema and annotation
   }
 });
 
-test("only pull_apply is marked destructive, and the read-only ones are marked read-only", () => {
+test("only pull_apply and undo_change are marked destructive, and the read-only ones are marked read-only", () => {
   const { tools } = build();
-  assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name), ["pull_apply"]);
+  assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["pull_apply", "undo_change"]);
   assert.deepEqual(tools.filter((t) => t.annotations.readOnlyHint).map((t) => t.name).sort(),
     ["check_workflow", "list_workflows", "pull_preview", "status"]);
 });
@@ -388,4 +388,37 @@ test("a failed apply is an error and keeps the earlier check", async () => {
   assert.equal(r.isError, true);
   assert.match(r.text, /unsafe/);
   assert.equal(ctx.state.checks["site-health-alert"].hash, "keep");
+});
+
+// ---------- undo_change ----------
+const RESTORED = say({ state: "restored", workflow: "workflows/site-health-alert", changes: CHANGES, at: "2026-10-18T00:00:00Z" });
+
+test("undo_change runs undo, says what was taken back, and forgets every earlier check", async () => {
+  const ctx = build({ answers: [RESTORED] });
+  ctx.state.checks["site-health-alert"] = { passed: true, hash: "x" };
+  const r = await ctx.byName.undo_change.handler({ theirWords: "please go back" });
+  assert.equal(r.isError, false);
+  assert.deepEqual(ctx.calls[0].args, ["undo", "--json"]);
+  assert.match(r.text, /back to “ALERT: down” \(it had been changed to “TEST: down”\)/);
+  assert.deepEqual(ctx.state.checks, {});
+});
+
+test("undo_change without the person's words, or with extra arguments, runs nothing", async () => {
+  for (const args of [{}, { theirWords: "" }, { theirWords: "  " }, { theirWords: "x".repeat(201) }, { theirWords: "ok", file: "../x" }]) {
+    const ctx = build({ answers: [RESTORED] });
+    assert.equal((await ctx.byName.undo_change.handler(args)).isError, true, JSON.stringify(args).slice(0, 40));
+    assert.equal(ctx.calls.length, 0);
+  }
+});
+
+test("undo_change explains each way it can be refused, and keeps earlier checks when nothing was undone", async () => {
+  for (const state of ["nothing-to-undo", "already-undone", "changed-since", "missing", "write-failed"]) {
+    const ctx = build({ answers: [say({ state }, 1)] });
+    ctx.state.checks.w = { passed: true, hash: "keep" };
+    const r = await ctx.byName.undo_change.handler({ theirWords: "undo it" });
+    assert.ok(r.text.length > 20, state);
+    assert.equal(ctx.state.checks.w.hash, "keep", state);
+  }
+  const garbled = build({ answers: [{ status: 1, stdout: "nope", out: "nope" }] });
+  assert.equal((await garbled.byName.undo_change.handler({ theirWords: "undo" })).isError, true);
 });

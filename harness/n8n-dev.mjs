@@ -7,8 +7,9 @@
 //   n8n-dev ui        <workflow-dir> [--port 5678]              the faked tests in a sealed local n8n editor (needs Docker)
 //   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
 //   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
+//   n8n-dev undo                                                put back workflow.json as it was before the last pull --apply (only if untouched since)
 //   n8n-dev status                                              is a sealed editor still open? (0 clean, 1 something is there, 2 unknown)
-//   --json (on check, pull, ui --detach, ui-stop)               print the facts as one JSON object, for programs such as the MCP server
+//   --json (on check, pull, undo, ui --detach, ui-stop)               print the facts as one JSON object, for programs such as the MCP server
 //   n8n-dev pull      [<workflow-dir>] [--apply] [--force]      bring edits saved in that editor back into workflow.json (dry run unless --apply)
 // The n8n CLI is taken from $N8N_CMD (default "n8n"). Each run uses a fresh, throwaway n8n data folder,
 // so nothing touches a real n8n, real credentials or real services.
@@ -21,12 +22,14 @@ import { parse as parseYaml } from "yaml";
 import { buildPlan, describeOps, planToJson, decidePull } from "./pull.mjs";
 import { startVerdict, savedSince } from "./session.mjs";
 import { findBash } from "./shell.mjs";
+import { makeRecord, decideUndo, safeRelative } from "./backup.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG = JSON.parse(fs.readFileSync(path.join(ROOT, "config/readiness.json"), "utf8"));
 const N8N_CMD = process.env.N8N_CMD || "n8n";
 const N8N_VERSION = process.env.N8N_VERSION || CONFIG.n8nVersion || "2.43.4";
 const WORK = path.join(ROOT, ".n8n-dev");
+const UNDO_FILE = path.join(WORK, "last-apply.json");
 const TRIGGER_RE = /(Trigger|webhook)$/i;
 
 // ---------- helpers ----------
@@ -436,7 +439,15 @@ function runPull() {
     return 0;
   }
   try {
-    fs.writeFileSync(path.resolve(ROOT, plan.manifest.workflowFile), JSON.stringify(plan.merged, null, 2) + "\n");
+    const target = path.resolve(ROOT, plan.manifest.workflowFile);
+    const after = JSON.stringify(plan.merged, null, 2) + "\n";
+    // Keep a copy of what is about to be overwritten, so `undo` can put it back. If the copy cannot be kept, nothing is written.
+    fs.mkdirSync(WORK, { recursive: true });
+    fs.writeFileSync(UNDO_FILE, JSON.stringify(makeRecord({
+      workflowFile: plan.manifest.workflowFile, workflowDir: plan.manifest.workflowDir, before: fs.readFileSync(target, "utf8"),
+      after, changes: facts.changes, at: new Date().toISOString(),
+    }), null, 2));
+    fs.writeFileSync(target, after);
   } catch (e) {
     if (asJson) return out({ state: "write-failed", message: e.message, ...facts }, 1);
     console.error(`\nCould not write ${plan.manifest.workflowFile}: ${e.message}`);
@@ -445,6 +456,25 @@ function runPull() {
   if (asJson) return out({ state: "applied", ...facts }, 0);
   console.log(`\nUpdated ${plan.manifest.workflowFile}. Next: run check, look at git diff, then open a pull request.`);
   return 0;
+}
+
+// ---------- undo: put back the file as it was before the last `pull --apply` ----------
+// Only if nobody has touched the file since (see backup.mjs). One step back: the copy is kept until the next apply.
+function runUndo() {
+  const asJson = args.includes("--json");
+  const say = (obj, code) => { if (asJson) console.log(JSON.stringify(obj)); else console.log(obj.message ?? obj.state); return code; };
+  let record = null;
+  try { record = JSON.parse(fs.readFileSync(UNDO_FILE, "utf8")); } catch { /* no record: nothing to undo */ }
+  const target = record && safeRelative(record.workflowFile) ? path.resolve(ROOT, record.workflowFile) : null;
+  const current = target && fs.existsSync(target) ? fs.readFileSync(target, "utf8") : undefined;
+  const decision = decideUndo({ record, currentText: current });
+  const facts = record ? { workflow: record.workflowDir, changes: record.changes, at: record.at } : {};
+  if (decision.state !== "restore") return say({ state: decision.state, ...facts, message: `Nothing was undone (${decision.state}).` }, decision.state === "already-undone" ? 0 : 1);
+  try {
+    fs.writeFileSync(target, decision.text);
+    fs.rmSync(UNDO_FILE, { force: true });
+  } catch (e) { return say({ state: "write-failed", message: e.message, ...facts }, 1); }
+  return say({ state: "restored", ...facts, message: `Restored ${record.workflowFile}.` }, 0);
 }
 
 // ---------- report ----------
@@ -474,11 +504,12 @@ function report(wf, s, st, tests) {
 if (cmd === "init") { (await import("./init.mjs")).init(ROOT, args.slice(1)); process.exit(0); }
 if (cmd === "pull") process.exit(runPull());
 if (cmd === "ui-stop") process.exit(runUiStop());
+if (cmd === "undo") process.exit(runUndo());
 if (cmd === "status") {   // is a sealed editor still open? Exit 0 = clean, 1 = something is there, 2 = could not tell
   process.exit(spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" }).status ?? 2);
 }
 if (!["scan", "structure", "test", "check", "ui"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | status");
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | undo [--json] | status");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));

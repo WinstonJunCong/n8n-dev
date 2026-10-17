@@ -2,7 +2,7 @@
 // and `runCli` (runs the n8n-dev command line with a fixed argument list), so every rule below can be tested with
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
-import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForStatus } from "./replies.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForStatus } from "./replies.mjs";
 
 const MINUTE = 60_000;
 export const MIN_OPEN_MS = 30_000;       // an editor the person has only just been given cannot be closed yet
@@ -183,6 +183,24 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
         if (!j) return result(unclear, true);
         if (j.state === "applied") delete state.checks[a.value.workflow];   // the content changed, so any earlier check no longer counts
         return plain(replyForApply(j));
+      },
+    },
+    {
+      name: "undo_change",
+      title: "Undo the last applied change",
+      description: "Put the workflow back exactly as it was before the last change was applied. ONLY call this when the person has asked, in their own words, to undo or go back (put their words in theirWords), or after you have told them a change broke the checks and they agreed to undo it. It only works if nobody has changed the workflow since, and it goes back one step.",
+      inputSchema: { type: "object", properties: { theirWords: { type: "string", description: "The person's own words asking to undo, copied exactly" } }, required: ["theirWords"], additionalProperties: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, { theirWords: { type: "string", required: true } });
+        if (a.error) return result(a.error, true);
+        const words = a.value.theirWords.trim();
+        if (!words || words.length > MAX_WORDS) return plain(replyForUndo({ state: "no-words" }));
+        const r = await run(["undo", "--json"], { okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        if (j.state === "restored") for (const k of Object.keys(state.checks)) delete state.checks[k];   // the content changed back
+        return plain(replyForUndo(j));
       },
     },
   ];
