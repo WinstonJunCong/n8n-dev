@@ -8,7 +8,7 @@
   },
   "scripts": {
     "check": "node harness/n8n-dev.mjs check",
-    "test": "node --test harness/testfix.test.mjs harness/backup.test.mjs harness/merge.test.mjs harness/pull.test.mjs harness/init.test.mjs harness/session.test.mjs mcp/guards.test.mjs mcp/boundary.test.mjs mcp/effects.test.mjs mcp/tools.test.mjs mcp/replies.test.mjs mcp/register.test.mjs mcp/server.test.mjs harness/shell.test.mjs",
+    "test": "node --test harness/cli-apply-undo.test.mjs harness/testfix.test.mjs harness/backup.test.mjs harness/merge.test.mjs harness/pull.test.mjs harness/init.test.mjs harness/session.test.mjs mcp/guards.test.mjs mcp/boundary.test.mjs mcp/effects.test.mjs mcp/tools.test.mjs mcp/replies.test.mjs mcp/register.test.mjs mcp/server.test.mjs harness/shell.test.mjs",
     "test:integration": "node --test harness/ui-lifecycle.integration.mjs"
   },
   "dependencies": {
