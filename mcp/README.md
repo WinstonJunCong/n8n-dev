@@ -31,6 +31,8 @@ It is a **thin, guarded wrapper over the same command line** you can run yoursel
 | `list_workflows` | Lists the workflows in the repo, with their test counts |
 | `check_workflow` | Runs the readiness scan, structure check and fake tests; returns the report |
 | `ui_start` | Opens the sealed editor with the faked tests loaded; returns the address and login |
+| `explain_test_failures` | After a change, finds tests that fail only because they expect the old wording and says so plainly; never touches any other failure |
+| `update_tests` | Updates just those tests, after the person confirms (one-time code); `undo_change` takes it back too |
 | `undo_change` | Puts the workflow back as it was before the last applied change (one step, only if untouched since) |
 | `ui_stop` | Only when the person says they are finished (their words are required, and not within 30 s of opening): saves any edits, closes the editor, and summarises what changed |
 | `status` | Says whether a sealed editor is still open |
