@@ -73,8 +73,8 @@ export function replyForStart(j) {
       `The safe test editor is open. Open this address in your browser: ${j.address}.${login}\n\n` +
       `You will see a copy of each test. Open one and click “Execute workflow” to watch it run. Change anything you like: it can't reach the internet or touch your real workflow. ` +
       `Boxes on a grey backdrop are pretend stand-ins for outside services; everything else is your real workflow. Changes save by themselves after a couple of seconds.\n\n` +
-      `When you are done, tell me and I'll close it and keep your changes.`,
-      "give the person the address and sign-in; call ui_stop when they say they are done");
+      `Take your time. When you have finished, just tell me “I'm done” and I'll close it and keep your changes. I won't close it until you say so.`,
+      "give the person the address and sign-in, then STOP. Do not call any other tool until the person writes back. Call ui_stop only when they say they are finished, and pass their words as theirWords");
   }
   const plain = {
     "already-running": "A test editor is already open (perhaps from earlier). Tell me to close it first and I'll keep any changes you made in it.",
@@ -99,6 +99,15 @@ export function replyForStop(j) {
     `${closed}${body ? `\n\n${body}` : "\n\nYou didn't change anything in your workflow."}${any ? "\n\nWant me to apply these to your workflow? I'll show you exactly what will change first." : ""}`,
     any ? "if they want to apply, call pull_preview, describe the changes, and get their agreement before pull_apply" : undefined,
     !j.cleaned);
+}
+
+export function replyForStopRefused(why) {
+  if (why === "too-soon") {
+    return reply("The test editor was only just opened, and the person hasn't had time to use it yet, so I have left it open. I'll close it when you tell me you've finished.",
+      "do not call ui_stop again now. Tell the person the editor is open, repeat the address and sign-in, and wait for them to say they are finished", true);
+  }
+  return reply("I didn't close the test editor, because I need to hear from you that you've finished. Tell me when you're done and I'll close it.",
+    "ask the person whether they are finished; call ui_stop only with their own words", true);
 }
 
 // ---------- applying changes ----------

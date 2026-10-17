@@ -2,16 +2,18 @@
 // and `runCli` (runs the n8n-dev command line with a fixed argument list), so every rule below can be tested with
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
-import { replyForCheck, replyForStart, replyForStop, replyForPreview, replyForApply, replyForStatus } from "./replies.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForStatus } from "./replies.mjs";
 
 const MINUTE = 60_000;
+export const MIN_OPEN_MS = 30_000;       // an editor the person has only just been given cannot be closed yet
+const MAX_WORDS = 200;
 const CLI_ENV = { N8N_CMD: "./scripts/n8n-docker.sh" };      // how `check` reaches the offline n8n
 const MANIFEST = ".n8n-dev/ui-manifest.json";
 const EXPORT_DIR = ".n8n-dev/ui-export";
 
-export function createTools({ fsx, runCli, codes }) {
-  // What the tools remember between calls: the latest check of each workflow, and which one is open.
-  const state = { checks: {}, chamber: null };
+export function createTools({ fsx, runCli, codes, now = Date.now }) {
+  // What the tools remember between calls: the latest check of each workflow, and which one is open (and since when).
+  const state = { checks: {}, chamber: null, openedAt: null };
   const result = (text, isError = false) => ({ text: truncate(text), isError });
 
   const workflowsDir = () => {
@@ -107,7 +109,7 @@ export function createTools({ fsx, runCli, codes }) {
     {
       name: "ui_start",
       title: "Open the sealed editor",
-      description: "Open a sealed local n8n editor with the workflow's tests loaded, so the person can see what the workflow does and try changes. It cannot reach the internet or the person's files. Returns an address and a throwaway login to give to the person. It stays open until ui_stop is called.",
+      description: "Open a sealed local n8n editor with the workflow's tests loaded, so the person can see what the workflow does and try changes. It cannot reach the internet or the person's files. Returns an address and a throwaway login to give to the person. After it succeeds, give the person the address and sign-in, then STOP and wait: do not call any other tool until the person writes back to you. It stays open until the person says they are finished.",
       inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" }, port: { type: "integer", description: "Optional, 1024 to 65535; the default is 5678" } }, required: ["workflow"], additionalProperties: false },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       async handler(args) {
@@ -121,23 +123,26 @@ export function createTools({ fsx, runCli, codes }) {
         if (a.value.port !== undefined) cli.push("--port", String(p.port));
         const r = await run(cli, { timeoutMs: 5 * MINUTE, okStatuses: [0, 1, 2] });
         const j = lastJson(r) ?? { state: "failed", details: r.out };
-        if (j.state === "started") state.chamber = a.value.workflow;
+        if (j.state === "started") { state.chamber = a.value.workflow; state.openedAt = now(); }
         return plain(replyForStart(j));
       },
     },
     {
       name: "ui_stop",
       title: "Close the editor and save edits",
-      description: "Save the person's edits from the sealed editor and close it. Always call this when they are done. It returns a summary of what they changed.",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      description: "Save the person's edits from the safe test editor and close it. ONLY call this after the person has written to you, in their own words, that they have finished. Never call it in the same step as ui_start, and never because you think the job is done: closing the editor ends their session. Put their words in theirWords. It returns what they changed.",
+      inputSchema: { type: "object", properties: { theirWords: { type: "string", description: "The person's own words saying they are finished, copied exactly (for example: I'm done)" } }, required: ["theirWords"], additionalProperties: false },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       async handler(args) {
-        const a = strictArgs(args, {});
+        const a = strictArgs(args, { theirWords: { type: "string", required: true } });
         if (a.error) return result(a.error, true);
+        const words = a.value.theirWords.trim();
+        if (!words || words.length > MAX_WORDS) return plain(replyForStopRefused("no-words"));
+        if (state.openedAt !== null && now() - state.openedAt < MIN_OPEN_MS) return plain(replyForStopRefused("too-soon"));
         const r = await run(["ui-stop", "--json"], { timeoutMs: 3 * MINUTE, okStatuses: [0, 1, 2] });
         const j = lastJson(r);
         if (!j) return result(unclear, true);
-        if (j.state !== "no-session") state.chamber = null;
+        if (j.state !== "no-session") { state.chamber = null; state.openedAt = null; }
         return plain(replyForStop(j));
       },
     },

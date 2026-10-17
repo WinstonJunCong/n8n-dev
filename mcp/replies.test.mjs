@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JARGON, describeChanges, describeNotApplied, plainAssertion,
-  replyForCheck, replyForStart, replyForStop, replyForPreview, replyForApply, replyForStatus,
+  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForStatus,
 } from "./replies.mjs";
 
 // The part of a reply meant for the person: without the line for the assistant and the support details.
@@ -83,6 +83,22 @@ test("stopping says plainly when the editor may not have closed, and when nothin
   assert.equal(replyForStop({ state: "saved", cleaned: false, summary: FACTS }).isError, true);
   assert.match(replyForStop({ state: "nothing-running", cleaned: true }).text, /nothing to save/);
   assert.match(replyForStop({ state: "no-session" }).text, /no test editor session/i);
+});
+
+test("starting ends by asking the person to say when they are done, and tells the assistant to wait", () => {
+  const r = replyForStart({ state: "started", address: "http://127.0.0.1:5678", login: { email: "a@b.c", password: "p" } });
+  assert.match(forPerson(r.text), /tell me “I'm done”/);
+  assert.match(forPerson(r.text), /won't close it until you say so/);
+  assert.match(r.text, /For you, the assistant.*STOP.*Do not call any other tool.*theirWords/s);
+});
+
+test("a refused stop explains itself to the person and tells the assistant to wait", () => {
+  for (const why of ["too-soon", "no-words"]) {
+    const r = replyForStopRefused(why);
+    assert.equal(r.isError, true);
+    assert.match(forPerson(r.text), /tell me you've finished|Tell me when you're done/);
+    assert.match(r.text, /For you, the assistant/);
+  }
 });
 
 // ---------- applying ----------
@@ -191,6 +207,7 @@ const everyReply = () => {
     missing: ["t"], conflicts: [{}], changedMeanwhile: true };
   for (const state of ["already-running", "docker-missing", "no-tests", "bad-port", "build-failed", "failed", "x"]) out.push(replyForStart({ state, details: "docker: command not found" }));
   out.push(replyForStart({ state: "started", address: "http://127.0.0.1:5678", login: { email: "a@b.c", password: "p" } }));
+  out.push(replyForStopRefused("too-soon"), replyForStopRefused("no-words"));
   for (const j of [{ state: "saved", cleaned: true, summary: rich }, { state: "saved", cleaned: false, summary: FACTS }, { state: "nothing-running" }, { state: "no-session" }]) out.push(replyForStop(j));
   for (const reason of ["conflict", "changed-meanwhile", "scan", "other"]) { out.push(replyForPreview({ state: "blocked", reason, findings: scanFinding, ...rich }, undefined)); out.push(replyForApply({ state: "blocked", reason, ...rich })); }
   out.push(replyForPreview({ state: "ready", ...rich }, "123456"), replyForPreview({ state: "nothing", ...rich, changes: [] }), replyForPreview({ state: "no-session" }), replyForPreview({ state: "wrong-workflow", expected: "a", given: "b" }));

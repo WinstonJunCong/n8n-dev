@@ -2,7 +2,7 @@
 // Run with: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createTools } from "./tools.mjs";
+import { createTools, MIN_OPEN_MS } from "./tools.mjs";
 import { makeCodeStore } from "./guards.mjs";
 
 // ---------- fakes ----------
@@ -37,13 +37,13 @@ const fakeRunner = (...answers) => {
   const runCli = async (args, opts) => { calls.push({ args, opts }); return answers.shift() ?? { status: 0, out: "", timedOut: false }; };
   return { runCli, calls };
 };
-const build = ({ files = repo(), answers = [] } = {}) => {
+const build = ({ files = repo(), answers = [], clock = { t: 1_000_000 } } = {}) => {
   const fsx = fakeFs(files);
   const runner = fakeRunner(...answers);
   const codes = makeCodeStore({ random: (() => { let n = 100000; return () => n++; })() });
-  const made = createTools({ fsx, runCli: runner.runCli, codes });
+  const made = createTools({ fsx, runCli: runner.runCli, codes, now: () => clock.t });
   const byName = Object.fromEntries(made.tools.map((t) => [t.name, t]));
-  return { ...made, byName, fsx, calls: runner.calls, codes };
+  return { ...made, byName, fsx, calls: runner.calls, codes, clock };
 };
 
 // What the command line prints with --json: one JSON object on standard output.
@@ -221,7 +221,7 @@ test("ui_start says what went wrong in plain words when it did not start", async
 test("ui_stop runs ui-stop, says what the person changed, and clears the open chamber", async () => {
   const { byName, calls, state } = build({ answers: [say(STOPPED)] });
   state.chamber = "site-health-alert";
-  const r = await byName.ui_stop.handler({});
+  const r = await byName.ui_stop.handler({ theirWords: "I am done" });
   assert.equal(r.isError, false);
   assert.deepEqual(calls.at(-1).args, ["ui-stop", "--json"]);
   assert.match(r.text, /In “Compose alert”, the text changed from “ALERT: down” to “TEST: down”/);
@@ -231,9 +231,50 @@ test("ui_stop runs ui-stop, says what the person changed, and clears the open ch
 test("ui_stop with no open session leaves a remembered chamber alone", async () => {
   const { byName, state } = build({ answers: [say({ state: "no-session" }, 2)] });
   state.chamber = "site-health-alert";
-  const r = await byName.ui_stop.handler({});
+  const r = await byName.ui_stop.handler({ theirWords: "I am done" });
   assert.match(r.text, /no test editor session/i);
   assert.equal(state.chamber, "site-health-alert");
+});
+
+// ---------- closing the editor is the person's decision ----------
+const STOP_DONE = say({ state: "saved", cleaned: true, summary: { ...FACTS, changes: [] } });
+
+test("ui_stop right after ui_start is refused and never reaches the command line", async () => {
+  const ctx = build({ answers: [say(STARTED), STOP_DONE] });
+  await ctx.byName.ui_start.handler({ workflow: "site-health-alert" });
+  ctx.clock.t += 3_000;                                                  // the assistant calls it seconds later
+  const r = await ctx.byName.ui_stop.handler({ theirWords: "I am done" });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /only just opened/);
+  assert.equal(ctx.calls.length, 1, "only the start ran");
+  assert.equal(ctx.state.chamber, "site-health-alert", "the editor is still considered open");
+});
+
+test("control: after enough time, with the person's words, ui_stop does run", async () => {
+  const ctx = build({ answers: [say(STARTED), STOP_DONE] });
+  await ctx.byName.ui_start.handler({ workflow: "site-health-alert" });
+  ctx.clock.t += MIN_OPEN_MS;
+  const r = await ctx.byName.ui_stop.handler({ theirWords: "I'm done" });
+  assert.equal(r.isError, false);
+  assert.deepEqual(ctx.calls.at(-1).args, ["ui-stop", "--json"]);
+  assert.equal(ctx.state.chamber, null);
+  assert.equal(ctx.state.openedAt, null);
+});
+
+test("ui_stop without the person's words is refused and runs nothing", async () => {
+  for (const args of [{}, { theirWords: "" }, { theirWords: "   " }, { theirWords: "x".repeat(201) }, { theirWords: 5 }, { theirWords: "ok", extra: 1 }]) {
+    const ctx = build({ answers: [STOP_DONE] });
+    const r = await ctx.byName.ui_stop.handler(args);
+    assert.equal(r.isError, true, JSON.stringify(args).slice(0, 40));
+    assert.equal(ctx.calls.length, 0);
+  }
+});
+
+test("an editor left open from an earlier session can still be closed with the person's words", async () => {
+  const ctx = build({ answers: [STOP_DONE] });                           // this server run never started it, so there is no start time
+  const r = await ctx.byName.ui_stop.handler({ theirWords: "I'm done" });
+  assert.equal(r.isError, false);
+  assert.equal(ctx.calls.length, 1);
 });
 
 // ---------- pull_preview / pull_apply ----------
