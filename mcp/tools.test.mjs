@@ -61,7 +61,7 @@ const BAD_NAMES = ["../etc", "..", "a/b", "a\\b", "/abs", "a b", "", "x;rm -rf",
 // ---------- the tools as a set ----------
 test("every tool has a name, a plain description, a strict schema and annotations", () => {
   const { tools } = build();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "list_workflows", "pull_apply", "pull_preview", "status", "ui_start", "ui_stop", "undo_change"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "ui_start", "ui_stop", "undo_change", "update_tests"]);
   for (const t of tools) {
     assert.ok(t.description.length > 30, t.name);
     assert.equal(t.inputSchema.type, "object", t.name);
@@ -71,22 +71,22 @@ test("every tool has a name, a plain description, a strict schema and annotation
   }
 });
 
-test("only pull_apply and undo_change are marked destructive, and the read-only ones are marked read-only", () => {
+test("only pull_apply, update_tests and undo_change are marked destructive, and the read-only ones are marked read-only", () => {
   const { tools } = build();
-  assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["pull_apply", "undo_change"]);
+  assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["pull_apply", "undo_change", "update_tests"]);
   assert.deepEqual(tools.filter((t) => t.annotations.readOnlyHint).map((t) => t.name).sort(),
-    ["check_workflow", "list_workflows", "pull_preview", "status"]);
+    ["check_workflow", "explain_test_failures", "list_workflows", "pull_preview", "status"]);
 });
 
 test("every tool that takes a workflow refuses bad names without running anything", async () => {
   const { byName, calls } = build();
-  for (const tool of ["check_workflow", "ui_start", "pull_preview"]) {
+  for (const tool of ["check_workflow", "ui_start", "pull_preview", "explain_test_failures"]) {
     for (const workflow of BAD_NAMES) {
       const r = await byName[tool].handler({ workflow });
       assert.equal(r.isError, true, `${tool} accepted ${JSON.stringify(workflow)}`);
     }
   }
-  for (const workflow of BAD_NAMES) assert.equal((await byName.pull_apply.handler({ workflow, code: "123456" })).isError, true);
+  for (const workflow of BAD_NAMES) for (const t of ["pull_apply", "update_tests"]) assert.equal((await byName[t].handler({ workflow, code: "123456" })).isError, true);
   assert.equal(calls.length, 0, "a refused call must never reach the command line");
 });
 
@@ -421,4 +421,91 @@ test("undo_change explains each way it can be refused, and keeps earlier checks 
   }
   const garbled = build({ answers: [{ status: 1, stdout: "nope", out: "nope" }] });
   assert.equal((await garbled.byName.undo_change.handler({ theirWords: "undo" })).isError, true);
+});
+
+// ---------- explain_test_failures / update_tests ----------
+const UPDATE = { test: "Down site sends an alert", file: "01.yaml", from: "ALERT: docs is not healthy", to: "OLALA: docs is not healthy" };
+const FIX_READY = say({ state: "ready", workflow: "workflows/site-health-alert", updates: [UPDATE], unexplained: [] });
+const FIX_APPLIED = say({ state: "applied", workflow: "workflows/site-health-alert", updates: [UPDATE], unexplained: [] });
+const withApply = () => ({ ...repo(), ".n8n-dev/last-apply.json": '{"r":1}' });
+const UNEXPLAINED = say({ state: "unexplained", unexplained: [{ test: "Down", reason: "unrelated", assertion: 'node "Send alert" called 1 time', detail: "called 0 time(s)" }] }, 1);
+
+test("explain_test_failures asks for a dry run, shows the old and new wording, and issues a code only when there is something to update", async () => {
+  const ctx = build({ files: withApply(), answers: [FIX_READY] });
+  const r = await ctx.byName.explain_test_failures.handler({ workflow: "site-health-alert" });
+  assert.deepEqual(ctx.calls[0].args, ["tests-fix", "workflows/site-health-alert", "--json"]);
+  assert.match(r.text, /currently expects “ALERT: docs is not healthy”. It would expect “OLALA: docs is not healthy”/);
+  assert.match(r.text, /Did you mean to change that on purpose/);
+  assert.match(r.text, /code 1000\d\d/);
+});
+
+test("explain_test_failures issues no code, and offers a colleague, when nothing can be safely updated", async () => {
+  for (const answer of [
+    UNEXPLAINED,
+    say({ state: "nothing", updates: [], unexplained: [] }),
+    say({ state: "no-change" }, 1),
+    say({ state: "wrong-workflow", expected: "a", given: "b" }, 2),
+  ]) {
+    const ctx = build({ files: withApply(), answers: [answer] });
+    const r = await ctx.byName.explain_test_failures.handler({ workflow: "site-health-alert" });
+    assert.doesNotMatch(r.text, /code \d{6}/, answer.stdout);
+  }
+  const unexplained = build({ files: withApply(), answers: [UNEXPLAINED] });
+  assert.match((await unexplained.byName.explain_test_failures.handler({ workflow: "site-health-alert" })).text, /someone who knows the tests/);
+  const garbled = build({ files: withApply(), answers: [{ status: 1, stdout: "no json", out: "no json" }] });
+  assert.equal((await garbled.byName.explain_test_failures.handler({ workflow: "site-health-alert" })).isError, true);
+});
+
+const explainThenCode = async (ctx) => (await ctx.byName.explain_test_failures.handler({ workflow: "site-health-alert" })).text.match(/code (\d{6})/)[1];
+
+test("update_tests with the right code applies, says what the tests now expect, and forgets the old check", async () => {
+  const ctx = build({ files: withApply(), answers: [FIX_READY, FIX_APPLIED] });
+  ctx.state.checks["site-health-alert"] = { passed: false, hash: "old" };
+  const code = await explainThenCode(ctx);
+  const r = await ctx.byName.update_tests.handler({ workflow: "site-health-alert", code });
+  assert.equal(r.isError, false);
+  assert.deepEqual(ctx.calls.at(-1).args, ["tests-fix", "workflows/site-health-alert", "--apply", "--json"]);
+  assert.match(r.text, /now expects “OLALA: docs is not healthy” \(it used to expect “ALERT: docs is not healthy”\)/);
+  assert.equal(ctx.state.checks["site-health-alert"], undefined);
+});
+
+test("update_tests without a code, with a wrong code, or replayed, runs nothing", async () => {
+  const ctx = build({ files: withApply(), answers: [FIX_READY, FIX_APPLIED] });
+  for (const code of ["123456", "", "abc"]) assert.equal((await ctx.byName.update_tests.handler({ workflow: "site-health-alert", code })).isError, true, code);
+  assert.equal(ctx.calls.length, 0);
+  const code = await explainThenCode(ctx);
+  await ctx.byName.update_tests.handler({ workflow: "site-health-alert", code });
+  const after = ctx.calls.length;
+  assert.equal((await ctx.byName.update_tests.handler({ workflow: "site-health-alert", code })).isError, true);
+  assert.equal(ctx.calls.length, after);
+});
+
+test("a code for updating tests stops working if the workflow, a test, or the record of the apply changes", async () => {
+  for (const change of [
+    (f) => { f["workflows/site-health-alert/workflow.json"] = '{"v":"edited"}'; },
+    (f) => { f["workflows/site-health-alert/tests/01-down.yaml"] = "test: edited"; },
+    (f) => { f[".n8n-dev/last-apply.json"] = '{"r":2}'; },
+  ]) {
+    const ctx = build({ files: withApply(), answers: [FIX_READY, FIX_APPLIED] });
+    const code = await explainThenCode(ctx);
+    change(ctx.fsx.files);
+    assert.equal((await ctx.byName.update_tests.handler({ workflow: "site-health-alert", code })).isError, true);
+    assert.equal(ctx.calls.length, 1, "only the dry run ran");
+  }
+});
+
+test("a code from the pull preview cannot be used to update tests, and the other way round", async () => {
+  const ctx = build({ files: { ...withApply(), ".n8n-dev/ui-manifest.json": '{"m":1}', ".n8n-dev/ui-export/a.json": '{"e":1}' }, answers: [PREVIEW_WITH_CHANGES, FIX_READY] });
+  const pullCode = (await ctx.byName.pull_preview.handler({ workflow: "site-health-alert" })).text.match(/code (\d{6})/)[1];
+  assert.equal((await ctx.byName.update_tests.handler({ workflow: "site-health-alert", code: pullCode })).isError, true);
+  const testCode = await explainThenCode(ctx);
+  assert.equal((await ctx.byName.pull_apply.handler({ workflow: "site-health-alert", code: testCode })).isError, true);
+});
+
+test("an explanation with nothing to update does not even create a code behind the scenes", async () => {
+  const ctx = build({ files: withApply(), answers: [UNEXPLAINED, say({ state: "nothing", updates: [], unexplained: [] }), FIX_READY] });
+  await ctx.byName.explain_test_failures.handler({ workflow: "site-health-alert" });
+  await ctx.byName.explain_test_failures.handler({ workflow: "site-health-alert" });
+  const r = await ctx.byName.explain_test_failures.handler({ workflow: "site-health-alert" });
+  assert.match(r.text, /code 100000\b/, "the first code ever issued, so the earlier answers issued none");
 });

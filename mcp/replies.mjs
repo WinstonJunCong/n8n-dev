@@ -145,7 +145,7 @@ export function replyForApply(j) {
     const lines = describeChanges(j.changes);
     return reply(
       `Done. Your change is now in the workflow ${q(j.workflow.split("/").pop())}.${lines.length ? `\n\n${bullets(lines)}` : ""}\n\nI'd run the checks again before anything else.`,
-      "call check_workflow now. If the checks now fail, tell the person plainly which test failed and why, and offer to undo the change with undo_change");
+      "call check_workflow now. If the checks now fail, tell the person plainly which test failed and why, then call explain_test_failures (and offer undo_change)");
   }
   if (j.state === "write-failed") return reply("I couldn't save the change to your workflow. Nothing was changed.", undefined, true);
   return replyForPreview(j);
@@ -182,6 +182,49 @@ export function replyForUndo(j) {
     "write-failed": "I couldn't put the workflow back. Nothing was changed.",
   }[j.state] ?? "I couldn't undo that.";
   return reply(plain, undefined, !["already-undone", "nothing-to-undo"].includes(j.state));
+}
+
+// ---------- tests that fail because of the person's change ----------
+const WHY = {
+  error: (t) => `The test ${q(t.test)} couldn't run at all`,
+  "not-text": (t) => `The test ${q(t.test)} is failing, and not because of any wording you changed`,
+  unrelated: (t) => `The test ${q(t.test)} is failing, and not because of any wording you changed`,
+  mismatch: (t) => `The test ${q(t.test)} is failing, and your wording change only explains part of it`,
+  "no-actual": (t) => `The test ${q(t.test)} is failing, and I can't tell why`,
+};
+const unexplainedLines = (list = []) => list.map((u) => {
+  const head = (WHY[u.reason] ?? WHY["no-actual"])(u);
+  return u.assertion ? `${head}: ${plainAssertion({ assertion: u.assertion, detail: u.detail })}` : head;
+});
+const updateLines = (list = []) => list.map((u) => `The test ${q(u.test)} currently expects ${q(u.from)}. It would expect ${q(u.to)} instead`);
+const NEEDS_COLLEAGUE = "Those need someone who knows the tests, so I won't change them. If you'd rather go back to how things were, I can undo your change.";
+
+export function replyForTestFix(j, code) {
+  if (j.state === "no-change") return reply("I can't tell which tests your change affects, because no change has been applied yet.", undefined, true);
+  if (j.state === "wrong-workflow") return reply(`Your latest applied change is for ${q(j.expected)}, not ${q(j.given)}.`, undefined, true);
+  if (j.state === "failed") return reply("I couldn't look at the tests just now. Make sure Docker Desktop is open and running, then ask me to try again.", undefined, true);
+  if (j.state === "nothing") return reply("None of the tests need changing: nothing is failing because of your change.");
+  const left = unexplainedLines(j.unexplained);
+  if (j.state === "unexplained") {
+    return reply(`Your change affects some tests, but not in a way I can safely fix on my own.\n${bullets(left)}\n\n${NEEDS_COLLEAGUE}`, "offer undo_change if the person wants to go back");
+  }
+  if (j.state === "ready") {
+    return reply(
+      `Some tests still expect the old wording, so they now fail. Your change explains each of these exactly:\n${bullets(updateLines(j.updates))}\n\n` +
+      `Did you mean to change that on purpose? If so, I can update just those tests to match. Nothing has been changed yet.` +
+      (left.length ? `\n\nSeparately, these are failing for other reasons:\n${bullets(left)}\n\n${NEEDS_COLLEAGUE}` : ""),
+      `ask the person to confirm they changed it on purpose, then call update_tests with the code ${code}`);
+  }
+  return reply("I can't update the tests right now.", undefined, true);
+}
+
+export function replyForTestUpdate(j) {
+  if (j.state === "applied") {
+    const lines = (j.updates ?? []).map((u) => `The test ${q(u.test)} now expects ${q(u.to)} (it used to expect ${q(u.from)})`);
+    return reply(`Done. I updated these tests to match your change:\n${bullets(lines)}\n\nI'd run the checks again to be sure everything passes.`, "call check_workflow now");
+  }
+  if (j.state === "write-failed") return reply("I couldn't update the tests. Nothing was changed.", undefined, true);
+  return replyForTestFix(j);
 }
 
 // ---------- checks and status ----------

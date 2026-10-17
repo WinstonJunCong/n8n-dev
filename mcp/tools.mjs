@@ -2,7 +2,7 @@
 // and `runCli` (runs the n8n-dev command line with a fixed argument list), so every rule below can be tested with
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
-import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForStatus } from "./replies.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForStatus } from "./replies.mjs";
 
 const MINUTE = 60_000;
 export const MIN_OPEN_MS = 30_000;       // an editor the person has only just been given cannot be closed yet
@@ -10,6 +10,7 @@ const MAX_WORDS = 200;
 const CLI_ENV = { N8N_CMD: "./scripts/n8n-docker.sh" };      // how `check` reaches the offline n8n
 const MANIFEST = ".n8n-dev/ui-manifest.json";
 const EXPORT_DIR = ".n8n-dev/ui-export";
+const LAST_APPLY = ".n8n-dev/last-apply.json";
 
 export function createTools({ fsx, runCli, codes, now = Date.now }) {
   // What the tools remember between calls: the latest check of each workflow, and which one is open (and since when).
@@ -37,6 +38,9 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
     manifest: fsx.exists(MANIFEST) ? fsx.readText(MANIFEST) : null,
     exports: exportFiles().map((f) => [f, fsx.readText(`${EXPORT_DIR}/${f}`)]),
   });
+
+  // A fingerprint of everything a test update would act on: the workflow, its tests and the record of the last apply.
+  const testsHash = (dir) => hashOf({ hash: workflowHash(dir), applied: fsx.exists(LAST_APPLY) ? fsx.readText(LAST_APPLY) : null });
 
   // Runs the command line and turns its answer into a tool result.
   const run = async (args, { timeoutMs = 2 * MINUTE, okStatuses = [0] } = {}) => {
@@ -183,6 +187,44 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
         if (!j) return result(unclear, true);
         if (j.state === "applied") delete state.checks[a.value.workflow];   // the content changed, so any earlier check no longer counts
         return plain(replyForApply(j));
+      },
+    },
+    {
+      name: "explain_test_failures",
+      title: "Explain tests broken by a change",
+      description: "After a change was applied, work out which tests now fail only because they still expect the old wording, and say so in plain words. It changes nothing and can take a minute or two. If it finds tests that can be updated it returns a one-time code. Tell the person exactly which wording the tests expect and ask them to confirm they changed it on purpose before you call update_tests with that code. Tests it cannot explain are never updated: say they need someone who knows the tests, and offer undo_change.",
+      inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" } }, required: ["workflow"], additionalProperties: false },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, { workflow: { type: "string", required: true } });
+        if (a.error) return result(a.error, true);
+        const w = pick(a.value.workflow);
+        if (w.error) return result(w.error, true);
+        const r = await run(["tests-fix", w.dir, "--json"], { timeoutMs: 10 * MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return plain(replyForTestFix({ state: "failed" }));
+        const code = j.state === "ready" ? codes.issue(`tests:${a.value.workflow}:${testsHash(w.dir)}`) : undefined;
+        return plain(replyForTestFix(j, code));
+      },
+    },
+    {
+      name: "update_tests",
+      title: "Update the tests a change broke",
+      description: "Update only the tests that explain_test_failures found, to match the new wording. It needs the code from explain_test_failures, and only works if nothing has changed since. Call it only after the person has seen exactly what the tests will expect and confirmed they changed the wording on purpose.",
+      inputSchema: { type: "object", properties: { workflow: { type: "string" }, code: { type: "string", description: "The code from explain_test_failures" } }, required: ["workflow", "code"], additionalProperties: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, { workflow: { type: "string", required: true }, code: { type: "string", required: true } });
+        if (a.error) return result(a.error, true);
+        const w = pick(a.value.workflow);
+        if (w.error) return result(w.error, true);
+        const redeemed = codes.redeem(a.value.code, `tests:${a.value.workflow}:${testsHash(w.dir)}`);
+        if (!redeemed.ok) return result(redeemed.reason, true);
+        const r = await run(["tests-fix", w.dir, "--apply", "--json"], { timeoutMs: 10 * MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        if (j.state === "applied") delete state.checks[a.value.workflow];
+        return plain(replyForTestUpdate(j));
       },
     },
     {

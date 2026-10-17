@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JARGON, describeChanges, describeNotApplied, plainAssertion,
-  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForPreview, replyForApply, replyForStatus,
+  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForPreview, replyForApply, replyForStatus,
 } from "./replies.mjs";
 
 // The part of a reply meant for the person: without the line for the assistant and the support details.
@@ -208,6 +208,8 @@ const everyReply = () => {
   for (const state of ["already-running", "docker-missing", "no-tests", "bad-port", "build-failed", "failed", "x"]) out.push(replyForStart({ state, details: "docker: command not found" }));
   out.push(replyForStart({ state: "started", address: "http://127.0.0.1:5678", login: { email: "a@b.c", password: "p" } }));
   out.push(replyForStopRefused("too-soon"), replyForStopRefused("no-words"));
+  for (const state of ["ready", "nothing", "unexplained", "no-change", "wrong-workflow", "failed", "other"]) out.push(replyForTestFix({ state, updates: [{ test: "Down", from: "a", to: "b" }], unexplained: [{ test: "Other", reason: "unrelated", assertion: 'node "N" called 1 time', detail: "called 0 time(s)" }, { test: "B", reason: "error" }], expected: "a", given: "b" }, "1"));
+  for (const state of ["applied", "write-failed", "ready"]) out.push(replyForTestUpdate({ state, updates: [{ test: "Down", from: "a", to: "b" }], unexplained: [] }));
   for (const state of ["restored", "no-words", "nothing-to-undo", "already-undone", "changed-since", "missing", "write-failed", "other"]) out.push(replyForUndo({ state, changes: rich.changes }));
   for (const j of [{ state: "saved", cleaned: true, summary: rich }, { state: "saved", cleaned: false, summary: FACTS }, { state: "nothing-running" }, { state: "no-session" }]) out.push(replyForStop(j));
   for (const reason of ["conflict", "changed-meanwhile", "scan", "other"]) { out.push(replyForPreview({ state: "blocked", reason, findings: scanFinding, ...rich }, undefined)); out.push(replyForApply({ state: "blocked", reason, ...rich })); }
@@ -270,4 +272,28 @@ test("each undo outcome has a plain reply, and only real failures are errors", (
   assert.match(replyForUndo({ state: "no-words" }).text, /Say the word/);
   for (const state of ["already-undone", "nothing-to-undo"]) assert.equal(replyForUndo({ state }).isError, false, state);
   for (const state of ["changed-since", "missing", "write-failed", "no-words", "other"]) assert.equal(replyForUndo({ state }).isError, true, state);
+});
+
+// ---------- tests broken by a change ----------
+const UPD = { test: "Down", from: "ALERT: x", to: "OLALA: x" };
+const OTHER = [{ test: "Other", reason: "unrelated", assertion: 'node "N" called 1 time', detail: "called 0 time(s)" }, { test: "Broken", reason: "error" }, { test: "T", reason: "mismatch" }];
+
+test("a test preview shows what the tests expect now and later, asks about intent, and hides the code from the person", () => {
+  const r = replyForTestFix({ state: "ready", updates: [UPD], unexplained: OTHER }, "654321");
+  assert.match(r.text, /currently expects “ALERT: x”\. It would expect “OLALA: x” instead/);
+  assert.match(forPerson(r.text), /Did you mean to change that on purpose/);
+  assert.match(forPerson(r.text), /someone who knows the tests/);
+  assert.doesNotMatch(forPerson(r.text), /654321|update_tests/);
+  assert.match(r.text, /For you, the assistant.*update_tests.*654321/s);
+});
+
+test("each way a test explanation can end has a plain reply", () => {
+  assert.match(replyForTestFix({ state: "nothing" }).text, /None of the tests need changing/);
+  assert.match(replyForTestFix({ state: "unexplained", unexplained: OTHER }).text, /not in a way I can safely fix/);
+  assert.match(replyForTestFix({ state: "no-change" }).text, /no change has been applied/);
+  assert.match(replyForTestFix({ state: "wrong-workflow", expected: "a", given: "b" }).text, /“a”, not “b”/);
+  assert.equal(replyForTestFix({ state: "failed" }).isError, true);
+  assert.match(replyForTestFix({ state: "failed" }).text, /Docker Desktop/);
+  assert.match(replyForTestUpdate({ state: "applied", updates: [UPD] }).text, /now expects “OLALA: x” \(it used to expect “ALERT: x”\)/);
+  assert.equal(replyForTestUpdate({ state: "write-failed" }).isError, true);
 });

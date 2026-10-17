@@ -7,6 +7,7 @@
 //   n8n-dev ui        <workflow-dir> [--port 5678]              the faked tests in a sealed local n8n editor (needs Docker)
 //   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
 //   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
+//   n8n-dev tests-fix <workflow-dir> [--apply] [--from-report f]  update tests that fail only because they expect the wording just changed (dry run unless --apply)
 //   n8n-dev undo                                                put back workflow.json as it was before the last pull --apply (only if untouched since)
 //   n8n-dev status                                              is a sealed editor still open? (0 clean, 1 something is there, 2 unknown)
 //   --json (on check, pull, undo, ui --detach, ui-stop)               print the facts as one JSON object, for programs such as the MCP server
@@ -18,11 +19,12 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, parseDocument } from "yaml";
 import { buildPlan, describeOps, planToJson, decidePull } from "./pull.mjs";
 import { startVerdict, savedSince } from "./session.mjs";
 import { findBash } from "./shell.mjs";
-import { makeRecord, decideUndo, safeRelative } from "./backup.mjs";
+import { makeRecord, addTestEdits, decideUndo, safeRelative } from "./backup.mjs";
+import { planTestUpdates, rewriteTestText } from "./testfix.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG = JSON.parse(fs.readFileSync(path.join(ROOT, "config/readiness.json"), "utf8"));
@@ -467,14 +469,63 @@ function runUndo() {
   try { record = JSON.parse(fs.readFileSync(UNDO_FILE, "utf8")); } catch { /* no record: nothing to undo */ }
   const target = record && safeRelative(record.workflowFile) ? path.resolve(ROOT, record.workflowFile) : null;
   const current = target && fs.existsSync(target) ? fs.readFileSync(target, "utf8") : undefined;
-  const decision = decideUndo({ record, currentText: current });
-  const facts = record ? { workflow: record.workflowDir, changes: record.changes, at: record.at } : {};
+  const currentTests = {};
+  for (const t of record?.tests ?? []) if (safeRelative(t.file) && fs.existsSync(path.resolve(ROOT, t.file))) currentTests[t.file] = fs.readFileSync(path.resolve(ROOT, t.file), "utf8");
+  const decision = decideUndo({ record, currentText: current, currentTests });
+  const facts = record ? { workflow: record.workflowDir, changes: record.changes, testsRestored: (record.tests ?? []).length, at: record.at } : {};
   if (decision.state !== "restore") return say({ state: decision.state, ...facts, message: `Nothing was undone (${decision.state}).` }, decision.state === "already-undone" ? 0 : 1);
   try {
     fs.writeFileSync(target, decision.text);
+    for (const t of decision.tests) fs.writeFileSync(path.resolve(ROOT, t.file), t.text);
     fs.rmSync(UNDO_FILE, { force: true });
   } catch (e) { return say({ state: "write-failed", message: e.message, ...facts }, 1); }
   return say({ state: "restored", ...facts, message: `Restored ${record.workflowFile}.` }, 0);
+}
+
+// ---------- tests-fix: update tests that only fail because they still expect the wording the person changed ----------
+// Dry run unless --apply. Only a line whose failure is fully explained by the last applied change is touched (testfix.mjs);
+// every other failure is reported and left alone. The old text is kept in the undo record, so `undo` takes it back too.
+function replaceAssertion(text, oldLine, newLine) {
+  const doc = parseDocument(text);
+  const seq = doc.get("assert");
+  const item = seq?.items?.find((i) => i?.value === oldLine);
+  if (!item) return null;
+  item.value = newLine;
+  item.type = /["']/.test(newLine) ? "QUOTE_SINGLE" : item.type;
+  return String(doc);
+}
+
+function runTestsFix(wf) {
+  const asJson = args.includes("--json");
+  const out = (obj, code) => { console.log(asJson ? JSON.stringify(obj) : (obj.message ?? obj.state)); return code; };
+  let record = null;
+  try { record = JSON.parse(fs.readFileSync(UNDO_FILE, "utf8")); } catch { /* nothing recorded */ }
+  if (!record) return out({ state: "no-change", message: "No applied change is recorded, so there is nothing to explain a failing test with." }, 1);
+  if (rel(wfDir) !== record.workflowDir) return out({ state: "wrong-workflow", expected: record.workflowDir, given: rel(wfDir) }, 2);
+  let tests;
+  if (flag("--from-report")) { try { tests = JSON.parse(fs.readFileSync(path.resolve(flag("--from-report")), "utf8")).tests; } catch (e) { return out({ state: "failed", message: "Could not read the report: " + e.message }, 2); } }
+  else tests = runTests(wf);
+  const plan = planTestUpdates({ tests: tests ?? [], changes: record.changes });
+  const facts = { workflow: record.workflowDir, updates: plan.updates.map((u) => ({ test: u.test, file: u.file, from: u.from, to: u.to })), unexplained: plan.unexplained };
+  if (!plan.updates.length) return out({ state: plan.unexplained.length ? "unexplained" : "nothing", ...facts, message: "No test line can be updated." }, plan.unexplained.length ? 1 : 0);
+  if (!args.includes("--apply")) return out({ state: "ready", ...facts, message: `${plan.updates.length} test line(s) can be updated. Re-run with --apply.` }, 0);
+  // Work everything out first; write only if every file rewrites cleanly and the undo record can be kept.
+  const byFile = new Map();
+  for (const u of plan.updates) byFile.set(u.file, [...(byFile.get(u.file) ?? []), u]);
+  const files = [];
+  for (const [file, edits] of byFile) {
+    const rp = rel(path.join(wfDir, "tests", file));
+    const before = fs.readFileSync(path.join(wfDir, "tests", file), "utf8");
+    const r = rewriteTestText(before, edits, replaceAssertion);
+    if (r.error) return out({ state: "write-failed", message: r.error, ...facts }, 1);
+    try { parseYaml(r.text); } catch (e) { return out({ state: "write-failed", message: "The updated test would not be valid: " + e.message, ...facts }, 1); }
+    files.push({ file: rp, abs: path.join(wfDir, "tests", file), before, after: r.text });
+  }
+  try {
+    fs.writeFileSync(UNDO_FILE, JSON.stringify(addTestEdits(record, files), null, 2));
+    for (const f of files) fs.writeFileSync(f.abs, f.after);
+  } catch (e) { return out({ state: "write-failed", message: e.message, ...facts }, 1); }
+  return out({ state: "applied", ...facts, message: "Updated." }, 0);
 }
 
 // ---------- report ----------
@@ -508,12 +559,13 @@ if (cmd === "undo") process.exit(runUndo());
 if (cmd === "status") {   // is a sealed editor still open? Exit 0 = clean, 1 = something is there, 2 = could not tell
   process.exit(spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" }).status ?? 2);
 }
-if (!["scan", "structure", "test", "check", "ui"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | undo [--json] | status");
+if (!["scan", "structure", "test", "check", "ui", "tests-fix"].includes(cmd) || !wfDir) {
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | undo [--json] | status");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
 if (cmd === "ui") { openUi(wf); process.exit(0); }
+if (cmd === "tests-fix") process.exit(runTestsFix(wf));
 const s =["scan", "check"].includes(cmd) ? scan(wf) : null;
 const st = ["structure", "check"].includes(cmd) ? structure(wf) : null;
 const tests = ["test", "check"].includes(cmd) ? runTests(wf) : null;
