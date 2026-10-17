@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { buildPlan, describeOps } from "./pull.mjs";
 import { startVerdict, savedSince } from "./session.mjs";
+import { findBash } from "./shell.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG = JSON.parse(fs.readFileSync(path.join(ROOT, "config/readiness.json"), "utf8"));
@@ -37,14 +38,14 @@ const wfFile = flag("--workflow-file") ? path.resolve(flag("--workflow-file")) :
 // Paths handed to n8n are relative to the repo root (forward slashes), and n8n runs with the repo root
 // as its working folder. This keeps them valid on Windows, macOS, Linux and inside the Docker container.
 const rel = (p) => path.relative(ROOT, p).split(path.sep).join("/");
-// On Windows, run N8N_CMD through Git Bash so ./scripts/n8n-docker.sh works (cmd.exe cannot run it).
-function pickShell() {
-  if (process.platform !== "win32") return true;
-  const candidates = [process.env.EXEPATH && path.join(process.env.EXEPATH, "bash.exe"),
-    "C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files\\Git\\usr\\bin\\bash.exe"].filter(Boolean);
-  return candidates.find((c) => fs.existsSync(c)) || (/\.sh$/.test(N8N_CMD) ? "bash" : true);
-}
-const SHELL = pickShell();
+// On Windows, run N8N_CMD and the chamber through Git Bash so the .sh scripts work (cmd.exe cannot run them). Git Bash
+// is found by where Git is installed, never by the plain name `bash`, which on Windows is WSL's Linux shell
+// (see shell.mjs). Only the commands that really need bash stop when it cannot be found.
+const gitPaths = process.platform === "win32"
+  ? (spawnSync("where", ["git"], { encoding: "utf8" }).stdout || "").split(/\r?\n/).filter(Boolean) : [];
+const BASH = findBash({ platform: process.platform, env: process.env, exists: fs.existsSync, gitPaths });
+if (BASH.error && (/\.sh$/.test(N8N_CMD) || ["ui", "ui-stop", "status"].includes(cmd))) { console.error(BASH.error); process.exit(2); }
+const SHELL = BASH.shell ?? true;
 function n8n(sub, dataDir) {
   const r = spawnSync(`${N8N_CMD} ${sub}`, {
     shell: SHELL, cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
