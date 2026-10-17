@@ -44,6 +44,7 @@ export function createTools({ fsx, runCli, codes }) {
   const tools = [
     {
       name: "list_workflows",
+      title: "List workflows",
       description: "List the n8n workflows in this repository, with how many tests each has. Use the names it returns with the other tools.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -64,6 +65,7 @@ export function createTools({ fsx, runCli, codes }) {
     },
     {
       name: "check_workflow",
+      title: "Check a workflow",
       description: "Run the safety checks and the tests for one workflow and return the report. Nothing real is contacted: every outside service is faked. It can take a minute or two, and longer the very first time.",
       inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" } }, required: ["workflow"], additionalProperties: false },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -82,6 +84,7 @@ export function createTools({ fsx, runCli, codes }) {
     },
     {
       name: "status",
+      title: "Check for an open editor",
       description: "Report whether a sealed editor from an earlier run is still open.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -95,6 +98,7 @@ export function createTools({ fsx, runCli, codes }) {
     },
     {
       name: "ui_start",
+      title: "Open the sealed editor",
       description: "Open a sealed local n8n editor with the workflow's tests loaded, so the person can see what the workflow does and try changes. It cannot reach the internet or the person's files. Returns an address and a throwaway login to give to the person. It stays open until ui_stop is called.",
       inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" }, port: { type: "integer", description: "Optional, 1024 to 65535; the default is 5678" } }, required: ["workflow"], additionalProperties: false },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -115,6 +119,7 @@ export function createTools({ fsx, runCli, codes }) {
     },
     {
       name: "ui_stop",
+      title: "Close the editor and save edits",
       description: "Save the person's edits from the sealed editor and close it. Always call this when they are done. It returns a summary of what they changed.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -129,6 +134,7 @@ export function createTools({ fsx, runCli, codes }) {
     },
     {
       name: "pull_preview",
+      title: "Preview changes to apply",
       description: "Show which of the person's edits would be applied to the workflow file. It changes nothing. If there is something to apply it returns a one-time code. Show the person the changes and ask them to confirm before you call pull_apply with that code.",
       inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" } }, required: ["workflow"], additionalProperties: false },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -149,6 +155,7 @@ export function createTools({ fsx, runCli, codes }) {
     },
     {
       name: "pull_apply",
+      title: "Apply the previewed changes",
       description: "Apply the previewed edits to the workflow file. It needs the code from pull_preview, and only works if nothing has changed since the preview. Call it only after the person has seen the changes and agreed.",
       inputSchema: { type: "object", properties: { workflow: { type: "string" }, code: { type: "string", description: "The code from pull_preview" } }, required: ["workflow", "code"], additionalProperties: false },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },

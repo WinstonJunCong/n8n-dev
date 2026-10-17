@@ -1,6 +1,22 @@
 # mcp/: use n8n-dev from an AI assistant
 
-**Status: work in progress.** The tools and the rules behind them are written and tested. The protocol layer that lets an assistant call them is not here yet, so nothing is callable from an app so far.
+**Status: work in progress.** The server runs and its tools work. `submit`, the per-app setup files and a one-click bundle are still to come.
+
+## Try it
+
+You need Node.js 20 or newer, and `npm install` run once in the repo. The server is started by the app, not by you: point your app at the command `node mcp/server.mjs` (give the full path to the file). For example, in Claude Code:
+
+```bash
+claude mcp add n8n-dev -- node /full/path/to/your-repo/mcp/server.mjs
+```
+
+Then start a new session and ask it to list your n8n workflows. To point the server at a different repo than the one it lives in, set `N8N_DEV_ROOT` to that repo's folder.
+
+## Two protocol eras, one set of tools
+
+MCP changed in revision 2026-07-28: the older versions open with an `initialize` handshake, the newer one has no handshake and sends the version with every request. Apps in the wild speak either, so the server answers both. The official library (`@modelcontextprotocol/server`) does the protocol work; the tools are registered once and served to both. `server.test.mjs` starts the real server and speaks each era to it.
+
+One known gap in the library: it checks the protocol version on a connection's first request, then pins the connection, so a later request claiming an unsupported version is still served. It is shown as a `todo` in `server.test.mjs`. It is harmless here, because nothing depends on the claimed version and every request on a standard-input connection comes from the one app that started it.
 
 ## What it is
 
@@ -41,6 +57,11 @@ These are enforced in code and pinned by tests, not left to instructions:
 | `guards.mjs` | The safety rules as pure functions: names, ports, argument checking, one-time codes, rate limits |
 | `tools.mjs` | The tools. No I/O of its own |
 | `effects.mjs` | The only code that reads files or starts a process |
-| `*.test.mjs` | Tests for each, including attempts to break out |
+| `register.mjs` | Turns the tools into protocol registrations (strict input schemas, plain error messages) |
+| `server.mjs` | The program an app starts. The only file that uses the MCP library |
+| `stdout-guard.mjs` | Sends anything printed with `console.log` to standard error, so only protocol messages reach the app |
+| `*.test.mjs` | Tests for each, including attempts to break out and a full conversation in both protocol eras |
 
-Still to come: the protocol layer, setup for each app, and `submit`.
+Two more rules are pinned by `boundary.test.mjs`: nothing here may print to standard output (it belongs to the protocol), and `mcp/` may only use Node's own modules, its own files, `@modelcontextprotocol/server` and `zod`.
+
+Still to come: setup files for each app, `submit`, and a one-click bundle.

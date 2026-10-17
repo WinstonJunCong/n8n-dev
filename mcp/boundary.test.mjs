@@ -46,3 +46,42 @@ test("mcp/ never runs shell strings: no exec, no shell option, no eval", () => {
     for (const [re, label] of forbidden) assert.ok(!re.test(code), `${file} uses ${label}`);
   }
 });
+
+// ---------- the protocol channel and the outside packages ----------
+const nonTest = () => sources("mcp", (f) => !f.endsWith(".test.mjs"));
+const importsOf = (code) => [...code.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*)["']([^"']+)["']/g)].map((m) => m[1]);
+
+test("nothing in mcp/ writes to standard output: only protocol messages may go there", () => {
+  for (const { file, text } of nonTest()) {
+    const code = stripComments(text);
+    assert.ok(!/\bconsole\s*\.\s*(?:log|info|debug)\s*\(/.test(code), `${file} prints with console.log/info/debug`);
+    assert.ok(!/\bprocess\s*\.\s*stdout\b/.test(code), `${file} touches process.stdout`);
+  }
+});
+
+test("server.mjs imports the stdout guard first, before anything can load and print", () => {
+  const code = stripComments(fs.readFileSync(path.join(ROOT, "mcp/server.mjs"), "utf8"));
+  assert.equal(importsOf(code)[0], "./stdout-guard.mjs");
+});
+
+test("the guard redirects console.log, info and debug to standard error", () => {
+  const code = fs.readFileSync(path.join(ROOT, "mcp/stdout-guard.mjs"), "utf8");
+  for (const name of ["log", "info", "debug"]) assert.match(code, new RegExp(`"${name}"`));
+  assert.match(code, /console\.error/);
+});
+
+test("mcp/ uses only Node's own modules, its own files, and the three allowed packages", () => {
+  const allowed = new Set(["@modelcontextprotocol/server", "@modelcontextprotocol/server/stdio", "zod/v4"]);
+  for (const { file, text } of nonTest()) {
+    for (const spec of importsOf(stripComments(text))) {
+      const fine = spec.startsWith("node:") || spec.startsWith("./") || allowed.has(spec);
+      assert.ok(fine, `${file} imports "${spec}", which is not on the allowed list`);
+    }
+  }
+});
+
+test("only server.mjs touches the MCP library, so the tools stay independent of it", () => {
+  for (const { file, text } of nonTest().filter((s) => s.file !== "mcp/server.mjs")) {
+    assert.ok(!/@modelcontextprotocol\//.test(stripComments(text)), `${file} imports the MCP library`);
+  }
+});
