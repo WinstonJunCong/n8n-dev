@@ -3,7 +3,17 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
-  "bin": { "n8n-dev": "harness/n8n-dev.mjs" },
-  "scripts": { "check": "node harness/n8n-dev.mjs check", "test": "node --test harness/merge.test.mjs harness/pull.test.mjs harness/init.test.mjs harness/session.test.mjs mcp/guards.test.mjs mcp/boundary.test.mjs mcp/effects.test.mjs mcp/tools.test.mjs", "test:integration": "node --test harness/ui-lifecycle.integration.mjs" },
-  "dependencies": { "yaml": "^2.5.0" }
+  "bin": {
+    "n8n-dev": "harness/n8n-dev.mjs"
+  },
+  "scripts": {
+    "check": "node harness/n8n-dev.mjs check",
+    "test": "node --test harness/merge.test.mjs harness/pull.test.mjs harness/init.test.mjs harness/session.test.mjs mcp/guards.test.mjs mcp/boundary.test.mjs mcp/effects.test.mjs mcp/tools.test.mjs mcp/register.test.mjs mcp/server.test.mjs",
+    "test:integration": "node --test harness/ui-lifecycle.integration.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "yaml": "^2.5.0",
+    "zod": "^4.6.7"
+  }
 }

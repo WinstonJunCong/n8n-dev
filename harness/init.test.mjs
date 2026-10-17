@@ -74,6 +74,9 @@ test("the generated repo's own unit tests pass inside it", {
     // as a runner and would exit 0 even when tests fail (a false pass).
     const env = { ...process.env, N8N_DEV_NESTED_TEST: "1" };
     delete env.NODE_TEST_CONTEXT;
+    // The generated repo would run `npm install` first; a plain copy of the installed packages stands in for that
+    // (a copy, not a link, so cleaning up can never reach the real ones).
+    fs.cpSync(path.join(ROOT, "node_modules"), path.join(target, "node_modules"), { recursive: true });
     const r = spawnSync(process.execPath, ["--test", ...tests], { cwd: target, encoding: "utf8", env });
     const failures = (r.stdout + r.stderr).slice(-1500);
     assert.equal(r.status, 0, `the generated repo's tests failed:\n${failures}`);
