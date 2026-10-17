@@ -2,6 +2,7 @@
 // and `runCli` (runs the n8n-dev command line with a fixed argument list), so every rule below can be tested with
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForPreview, replyForApply, replyForStatus } from "./replies.mjs";
 
 const MINUTE = 60_000;
 const CLI_ENV = { N8N_CMD: "./scripts/n8n-docker.sh" };      // how `check` reaches the offline n8n
@@ -40,6 +41,14 @@ export function createTools({ fsx, runCli, codes }) {
     const r = await runCli(args, { timeoutMs, env: CLI_ENV });
     return { ...r, ok: okStatuses.includes(r.status) };
   };
+  // The command line prints one JSON object as its last line when given --json. Anything before it is ignored.
+  const lastJson = (r) => {
+    const lines = String(r.stdout ?? r.out ?? "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("{"));
+    for (let i = lines.length - 1; i >= 0; i--) { try { return JSON.parse(lines[i]); } catch { /* try the line before */ } }
+    return null;
+  };
+  const plain = (reply) => result(reply.text, reply.isError);
+  const unclear = "I couldn't do that just now. Make sure Docker Desktop is open and running, then ask me to try again.";
 
   const tools = [
     {
@@ -75,11 +84,11 @@ export function createTools({ fsx, runCli, codes }) {
         const w = pick(a.value.workflow);
         if (w.error) return result(w.error, true);
         const hash = workflowHash(w.dir);
-        const r = await run(["check", w.dir], { timeoutMs: 10 * MINUTE, okStatuses: [0, 1] });
-        if (!r.ok) return result(`The check could not run.\n${r.out}`, true);
-        const passed = r.status === 0;
-        state.checks[a.value.workflow] = { passed, hash };
-        return result(r.out);
+        const r = await run(["check", w.dir, "--json"], { timeoutMs: 10 * MINUTE, okStatuses: [0, 1] });
+        const report = r.ok ? lastJson(r) : null;
+        if (!report) return plain(replyForCheck(a.value.workflow, null, r.out));
+        state.checks[a.value.workflow] = { passed: report.allPass === true, hash };
+        return plain(replyForCheck(a.value.workflow, report));
       },
     },
     {
@@ -92,8 +101,7 @@ export function createTools({ fsx, runCli, codes }) {
         const a = strictArgs(args, {});
         if (a.error) return result(a.error, true);
         const r = await run(["status"], { okStatuses: [0, 1] });
-        if (!r.ok) return result(`Could not tell.\n${r.out}`, true);
-        return result(r.out);
+        return plain(replyForStatus(r.ok ? r.status : 2, r.out));
       },
     },
     {
@@ -109,12 +117,12 @@ export function createTools({ fsx, runCli, codes }) {
         if (w.error) return result(w.error, true);
         const p = pickPort(a.value.port);
         if (p.error) return result(p.error, true);
-        const cli = ["ui", w.dir, "--detach"];
+        const cli = ["ui", w.dir, "--detach", "--json"];
         if (a.value.port !== undefined) cli.push("--port", String(p.port));
-        const r = await run(cli, { timeoutMs: 5 * MINUTE });
-        if (!r.ok) return result(r.out, true);          // includes "a chamber is already running"
-        state.chamber = a.value.workflow;
-        return result(r.out);
+        const r = await run(cli, { timeoutMs: 5 * MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r) ?? { state: "failed", details: r.out };
+        if (j.state === "started") state.chamber = a.value.workflow;
+        return plain(replyForStart(j));
       },
     },
     {
@@ -126,10 +134,11 @@ export function createTools({ fsx, runCli, codes }) {
       async handler(args) {
         const a = strictArgs(args, {});
         if (a.error) return result(a.error, true);
-        const r = await run(["ui-stop"], { timeoutMs: 3 * MINUTE });
-        if (!r.ok) return result(r.out, true);
-        state.chamber = null;
-        return result(r.out);
+        const r = await run(["ui-stop", "--json"], { timeoutMs: 3 * MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        if (j.state !== "no-session") state.chamber = null;
+        return plain(replyForStop(j));
       },
     },
     {
@@ -143,14 +152,12 @@ export function createTools({ fsx, runCli, codes }) {
         if (a.error) return result(a.error, true);
         const w = pick(a.value.workflow);
         if (w.error) return result(w.error, true);
-        const r = await run(["pull", w.dir], { okStatuses: [0, 1] });
-        if (!r.ok) return result(r.out, true);
+        const r = await run(["pull", w.dir, "--json"], { okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
         // A code is issued only when there really is something to apply and nothing blocks it.
-        if (r.status === 0 && /Dry run: nothing was changed/.test(r.out)) {
-          const code = codes.issue(`pull:${a.value.workflow}:${pullHash(w.dir)}`);
-          return result(`${r.out}\n\nTo apply these changes, ask the person to confirm, then call pull_apply with the code ${code}.`);
-        }
-        return result(r.out);
+        const code = j.state === "ready" ? codes.issue(`pull:${a.value.workflow}:${pullHash(w.dir)}`) : undefined;
+        return plain(replyForPreview(j, code));
       },
     },
     {
@@ -166,10 +173,11 @@ export function createTools({ fsx, runCli, codes }) {
         if (w.error) return result(w.error, true);
         const redeemed = codes.redeem(a.value.code, `pull:${a.value.workflow}:${pullHash(w.dir)}`);
         if (!redeemed.ok) return result(redeemed.reason, true);
-        const r = await run(["pull", w.dir, "--apply"], { okStatuses: [0] });
-        if (!r.ok) return result(r.out, true);
-        delete state.checks[a.value.workflow];            // the content changed, so any earlier check no longer counts
-        return result(`${r.out}\n\nThe workflow file changed, so run check_workflow again before anything else.`);
+        const r = await run(["pull", w.dir, "--apply", "--json"], { okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        if (j.state === "applied") delete state.checks[a.value.workflow];   // the content changed, so any earlier check no longer counts
+        return plain(replyForApply(j));
       },
     },
   ];
