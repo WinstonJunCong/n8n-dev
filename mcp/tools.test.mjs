@@ -2,7 +2,7 @@
 // Run with: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createTools, MIN_OPEN_MS } from "./tools.mjs";
+import { createTools, MIN_OPEN_MS, MIN_CONFIRM_MS } from "./tools.mjs";
 import { makeCodeStore, hashOf } from "./guards.mjs";
 
 // ---------- fakes ----------
@@ -61,13 +61,13 @@ const BAD_NAMES = ["../etc", "..", "a/b", "a\\b", "/abs", "a b", "", "x;rm -rf",
 // ---------- the tools as a set ----------
 test("every tool has a name, a plain description, a strict schema and annotations", () => {
   const { tools } = build();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit_preview", "ui_start", "ui_stop", "undo_change", "update_tests"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit", "submit_preview", "ui_start", "ui_stop", "undo_change", "update_tests"]);
   for (const t of tools) {
     assert.ok(t.description.length > 30, t.name);
     assert.equal(t.inputSchema.type, "object", t.name);
     assert.equal(t.inputSchema.additionalProperties, false, t.name);
     assert.equal(typeof t.handler, "function", t.name);
-    assert.equal(t.annotations.openWorldHint, false, `${t.name} must say it does not reach the outside world`);
+    assert.equal(t.annotations.openWorldHint, ["submit", "submit_preview"].includes(t.name), `${t.name}: only the two that talk to the team repository may say they reach outside`);
   }
 });
 
@@ -87,6 +87,7 @@ test("every tool that takes a workflow refuses bad names without running anythin
     }
   }
   for (const workflow of BAD_NAMES) for (const t of ["pull_apply", "update_tests"]) assert.equal((await byName[t].handler({ workflow, code: "123456" })).isError, true);
+  for (const workflow of BAD_NAMES) assert.equal((await byName.submit.handler({ workflow, code: "123456", theirWords: "yes" })).isError, true, `submit accepted ${JSON.stringify(workflow)}`);
   assert.equal(calls.length, 0, "a refused call must never reach the command line");
 });
 
@@ -530,7 +531,7 @@ test("submit_preview shows what would go, in plain words, sends nothing, and iss
   const r = await preview(ctx);
   assert.equal(r.isError, false);
   assert.deepEqual(ctx.calls.map((c) => c.args[0]), ["status", "submit-facts"]);
-  assert.deepEqual(ctx.calls[1].args, ["submit-facts", "workflows/site-health-alert", "--json"]);
+  assert.deepEqual(ctx.calls[1].args, ["submit-facts", "workflows/site-health-alert", "--fetch", "--json"]);
   assert.match(r.text, /Everything is in order to send this for review/);
   assert.match(r.text, /changed from “ALERT: down” to “TEST: down”/);
   assert.match(r.text, /The test “Down site sends an alert” was changed/);
@@ -594,4 +595,131 @@ test("submit_preview rejects unexpected arguments and bad reasons before running
     assert.equal((await ctx.byName.submit_preview.handler(args)).isError, true, JSON.stringify(args));
   }
   assert.equal(ctx.calls.length, 0);
+});
+
+// ---------- submit (the send step) ----------
+const SENT = say({ state: "sent", workflow: "workflows/site-health-alert", branch: "n8n-dev/site-health-alert-19700101-0016", base: "origin/main", commit: "abc123", remoteUrl: "https://github.com/acme/flows.git" });
+const SEND_WORDS = "Yes, please send it";
+// answers for: preview (status, facts) then submit (status, facts, send)
+const sendContext = (extra = []) => checked([CLEAN, SUBMIT_FACTS(), CLEAN, SUBMIT_FACTS(), SENT, ...extra]);
+const previewCode = async (ctx) => (await preview(ctx)).text.match(/is (\d{6})/)[1];
+const submit = (ctx, code, over = {}) => ctx.byName.submit.handler({ workflow: "site-health-alert", code, theirWords: SEND_WORDS, ...over });
+const sendCalls = (ctx) => ctx.calls.filter((c) => c.args[0] === "submit");
+
+test("submit sends the previewed change once the person has had time to read it, and gives the review link", async () => {
+  const ctx = sendContext();
+  const code = await previewCode(ctx);
+  ctx.clock.t += MIN_CONFIRM_MS;
+  const r = await submit(ctx, code);
+  assert.equal(r.isError, false);
+  assert.match(r.text, /Sent for review\. It is not live/);
+  assert.match(r.text, /https:\/\/github\.com\/acme\/flows\/pull\/new\/n8n-dev\/site-health-alert-19700101-0016/);
+  const [send] = sendCalls(ctx);
+  assert.deepEqual(send.args.slice(0, 5), ["submit", "workflows/site-health-alert", "--branch", "n8n-dev/site-health-alert-19700101-0016", "--message"]);
+  assert.match(send.args[5], /^Update site-health-alert/);
+  assert.ok(ctx.calls.filter((c) => c.args[0] === "submit-facts").every((c) => c.args.includes("--fetch")), "it refreshes from the team repository before deciding");
+});
+
+test("submit is refused, and sends nothing, when the person has not had time to read the preview or was never shown one", async () => {
+  const quick = sendContext();
+  const code = await previewCode(quick);
+  quick.clock.t += MIN_CONFIRM_MS - 1;
+  assert.match((await submit(quick, code)).text, /go-ahead first/);
+  assert.equal(sendCalls(quick).length, 0);
+
+  const never = sendContext();
+  assert.equal((await submit(never, "123456")).isError, true);
+  assert.equal(never.calls.length, 0);
+});
+
+test("submit needs the person's own words", async () => {
+  for (const theirWords of ["", "   ", "x".repeat(201)]) {
+    const ctx = sendContext();
+    const code = await previewCode(ctx);
+    ctx.clock.t += MIN_CONFIRM_MS;
+    const before = ctx.calls.length;
+    const r = await submit(ctx, code, { theirWords });
+    assert.equal(r.isError, true);
+    assert.equal(ctx.calls.length, before, "nothing ran");
+  }
+  const ctx = sendContext();
+  assert.equal((await ctx.byName.submit.handler({ workflow: "site-health-alert", code: "123456" })).isError, true);
+});
+
+test("submit refuses a wrong code and a replayed code, and never lets the assistant choose the branch or the message", async () => {
+  // answers: the preview, the attempt with the wrong code, then the real send
+  const ctx = checked([CLEAN, SUBMIT_FACTS(), CLEAN, SUBMIT_FACTS(), CLEAN, SUBMIT_FACTS(), SENT]);
+  const code = await previewCode(ctx);
+  ctx.clock.t += MIN_CONFIRM_MS;
+  assert.equal((await submit(ctx, "000000")).isError, true);
+  assert.equal(sendCalls(ctx).length, 0);
+  assert.equal((await submit(ctx, code, { branch: "main" })).isError, true, "an unknown argument is refused");
+  assert.equal((await submit(ctx, code, { message: "x" })).isError, true);
+  assert.equal(sendCalls(ctx).length, 0);
+  assert.equal((await submit(ctx, code)).isError, false);
+  const again = await submit(ctx, code);
+  assert.equal(again.isError, true);
+  assert.equal(sendCalls(ctx).length, 1, "a code works once");
+});
+
+test("everything is checked again at the moment of sending: a change since the preview stops it", async () => {
+  const stale = sendContext();
+  const code = await previewCode(stale);
+  stale.clock.t += MIN_CONFIRM_MS;
+  stale.fsx.files["workflows/site-health-alert/workflow.json"] = '{"v":"edited after the preview"}';
+  assert.match((await submit(stale, code)).text, /check again/);
+  assert.equal(sendCalls(stale).length, 0);
+
+  const opened = checked([CLEAN, SUBMIT_FACTS(), { status: 1, stdout: "LEFTOVERS", out: "LEFTOVERS", timedOut: false }, SUBMIT_FACTS(), SENT]);
+  const code2 = await previewCode(opened);
+  opened.clock.t += MIN_CONFIRM_MS;
+  assert.match((await submit(opened, code2)).text, /still open/);
+  assert.equal(sendCalls(opened).length, 0);
+
+  const moved = checked([CLEAN, SUBMIT_FACTS(), CLEAN, SUBMIT_FACTS({ files: [...FILES, { path: "workflows/site-health-alert/tests/02-up.yaml", status: "A" }] }), SENT]);
+  const code3 = await previewCode(moved);
+  moved.clock.t += MIN_CONFIRM_MS;
+  assert.equal((await submit(moved, code3)).isError, true, "a different list of files is a different preview");
+  assert.equal(sendCalls(moved).length, 0);
+});
+
+test("a failed push is explained plainly, and a later submit is not blocked by it", async () => {
+  const ctx = checked([CLEAN, SUBMIT_FACTS(), CLEAN, SUBMIT_FACTS(), say({ state: "push-failed", details: "fatal: could not read Username" }, 1)]);
+  const code = await previewCode(ctx);
+  ctx.clock.t += MIN_CONFIRM_MS;
+  const r = await submit(ctx, code);
+  assert.equal(r.isError, true);
+  assert.match(r.text, /may not be signed in/);
+  assert.match(r.text, /Technical details \(for support\): fatal: could not read Username/);
+});
+
+test("the preview refuses when the shared version moved, an earlier submission is waiting, or too many went in the last hour", async () => {
+  const hourAgo = (mins) => new Date(1_000_000 - mins * 60_000).toISOString();
+  const cases = [
+    [{ sharedChanged: true }, /Someone else has changed this workflow/],
+    [{ submissions: [{ workflow: "workflows/site-health-alert", branch: "n8n-dev/x", at: hourAgo(300), open: true }] }, /already have a change to this workflow waiting/],
+    [{ submissions: [1, 2, 3].map((i) => ({ workflow: `workflows/w${i}`, branch: `n8n-dev/w${i}`, at: hourAgo(i * 10), open: false })) }, /already sent 3 changes in the last hour/],
+  ];
+  for (const [extra, expected] of cases) {
+    const ctx = checked([CLEAN, SUBMIT_FACTS(extra)]);
+    const r = await preview(ctx);
+    assert.match(r.text, expected);
+    assert.doesNotMatch(r.text, /is \d{6}/);
+  }
+  // controls: the same facts without the problem, or with old/closed/other-workflow submissions, are fine
+  const fine = [
+    {},
+    { sharedChanged: false },
+    { submissions: [{ workflow: "workflows/site-health-alert", branch: "n8n-dev/x", at: hourAgo(300), open: false }] },
+    { submissions: [{ workflow: "workflows/another", branch: "n8n-dev/y", at: hourAgo(300), open: true }] },
+    { submissions: [1, 2, 3].map((i) => ({ workflow: `workflows/w${i}`, branch: `n8n-dev/w${i}`, at: hourAgo(61 + i), open: false })) },
+    { submissions: [1, 2].map((i) => ({ workflow: `workflows/w${i}`, branch: `n8n-dev/w${i}`, at: hourAgo(i), open: false })) },
+  ];
+  for (const extra of fine) assert.match((await preview(checked([CLEAN, SUBMIT_FACTS(extra)]))).text, /Everything is in order/, JSON.stringify(extra).slice(0, 60));
+});
+
+test("a preview says when it could not refresh from the team's repository", async () => {
+  const ctx = checked([CLEAN, SUBMIT_FACTS({ fetched: false })]);
+  assert.match((await preview(ctx)).text, /couldn't reach the team's repository/);
+  assert.doesNotMatch((await preview(checked([CLEAN, SUBMIT_FACTS({ fetched: true })]))).text, /couldn't reach/);
 });

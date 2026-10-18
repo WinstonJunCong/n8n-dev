@@ -34,6 +34,7 @@ It is a **thin, guarded wrapper over the same command line** you can run yoursel
 | `explain_test_failures` | After a change, finds tests that fail only because they expect the old wording and says so plainly; never touches any other failure |
 | `update_tests` | Updates just those tests, after the person confirms (one-time code); `undo_change` takes it back too |
 | `submit_preview` | Shows exactly what would be sent for review and whether every gate passes; sends nothing (the send step is next) |
+| `submit` | Sends the previewed change to the team for review as a new proposal (needs the code and the person's own words); returns the review link |
 | `undo_change` | Puts the workflow back as it was before the last applied change (one step, only if untouched since) |
 | `ui_stop` | Only when the person says they are finished (their words are required, and not within 30 s of opening): saves any edits, closes the editor, and summarises what changed |
 | `status` | Says whether a sealed editor is still open |

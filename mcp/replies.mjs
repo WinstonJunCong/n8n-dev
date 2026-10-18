@@ -242,6 +242,9 @@ const SUBMIT_BLOCKS = {
   "no-repo": () => "This folder isn't set up for sharing changes, so I can't send anything for review.",
   "no-base": () => "I can't find the shared version to compare with, so I can't tell what is different.",
   "no-facts": () => "I couldn't work out what is different from the shared version.",
+  "shared-changed": () => "Someone else has changed this workflow since your copy was taken. Sending yours now would undo their work, so it can't go. It needs to be started again from the latest version: ask an admin to bring your copy up to date.",
+  "open-submission": () => "You already have a change to this workflow waiting for review. Wait until it has been reviewed before sending another.",
+  "rate-limit": (r) => `You've already sent ${r.max} changes in the last hour. Please wait a little before sending another.`,
 };
 const SUBMIT_HINTS = { "no-check": "call check_workflow", "check-stale": "call check_workflow", "editor-open": "ask whether they have finished with the editor; call ui_stop only with their own words", "workflow-without-test": "ask the person for a one-sentence reason, then call submit_preview again with it as reason" };
 const GIT_PROBLEMS = new Set(["no-git", "no-repo", "no-base", "no-facts"]);
@@ -270,8 +273,35 @@ export function replyForSubmitPreview(decision, facts, code) {
   if (decision.testsRemoved) parts.push("Tests were removed. The reviewer will want to know why.");
   else if (decision.testsChanged) parts.push("Because tests were changed, a technical reviewer will look at those closely before anything goes live.");
   if (decision.noTestReason) parts.push(`No test changed. You told me why: ${q(decision.noTestReason)}.`);
-  parts.push("Nothing has been sent yet.");
-  return reply(parts.join("\n\n"), `the one-time code is ${code}; the step that actually sends it is not available in this version yet, so tell the person it is coming`);
+  if (facts.fetched === false) parts.push("I couldn't reach the team's repository just now, so this comparison might be out of date.");
+  parts.push("Nothing has been sent yet. If you'd like me to send it for review, say so.");
+  return reply(parts.join("\n\n"), `the one-time code is ${code}. Show the person the above, then STOP and wait for them to tell you in their own words to send it. Only then call submit with this code and their words as theirWords (and the same reason, if any)`);
+}
+
+export function replyForSubmitRefused(why) {
+  if (why === "too-soon") {
+    return reply("I need your go-ahead first. Have a look at what would be sent, and tell me if you'd like me to send it.",
+      "do not call submit yet: the person has not had time to read the preview. Show it and wait for their reply", true);
+  }
+  return reply("I haven't sent anything, because I need to hear from you that you want it sent. Tell me and I'll send it.",
+    "ask the person; call submit only with their own words as theirWords", true);
+}
+
+export function replyForSend(j, link) {
+  if (j.state === "sent") {
+    return reply(`Sent for review. It is not live: a reviewer has to look at it and approve it first.\n\n${link ? `Open this link to start the review: ${link}` : "I couldn't make a link for it, so let a colleague know it is waiting for review."}`,
+      "tell the person what happens next: a reviewer looks at it; they will be told if it needs changes");
+  }
+  const plain = {
+    nothing: "There was nothing different to send, so I didn't send anything.",
+    "push-failed": "I couldn't send it. Your computer may not be signed in to the team's repository, or you may be offline. Nothing was changed.",
+    "no-identity": "Your computer doesn't know who you are for sharing changes, so I can't send this. A colleague can set that up once for you.",
+    "no-remote": "This folder isn't connected to the team's repository, so I can't send anything.",
+    "no-git": "The tool that keeps track of changes isn't installed on this computer, so I can't send changes for review.",
+    "no-repo": "This folder isn't set up for sharing changes, so I can't send anything for review.",
+    "no-base": "I can't find the shared version to compare with, so I can't send anything.",
+  }[j.state] ?? "I couldn't send it. Nothing was changed.";
+  return reply(plain + technical(j.state === "push-failed" ? j.details : ""), undefined, j.state !== "nothing");
 }
 
 // ---------- checks and status ----------

@@ -8,7 +8,8 @@
 //   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
 //   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
 //   n8n-dev tests-fix <workflow-dir> [--apply] [--from-report f]  update tests that fail only because they expect the wording just changed (dry run unless --apply)
-//   n8n-dev submit-facts <workflow-dir>                          what differs from the shared branch (read-only, JSON), for the submit checks
+//   n8n-dev submit <workflow-dir> --branch n8n-dev/<name> --message <text>   send the workflow folder to a NEW branch of the team repository (never the shared branch)
+//   n8n-dev submit-facts <workflow-dir> [--fetch]                          what differs from the shared branch (read-only, JSON), for the submit checks
 //   n8n-dev undo                                                put back workflow.json as it was before the last pull --apply (only if untouched since)
 //   n8n-dev status                                              is a sealed editor still open? (0 clean, 1 something is there, 2 unknown)
 //   --json (on check, pull, undo, ui --detach, ui-stop)               print the facts as one JSON object, for programs such as the MCP server
@@ -17,6 +18,7 @@
 // so nothing touches a real n8n, real credentials or real services.
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -533,15 +535,27 @@ function runTestsFix(wf) {
 // ---------- submit-facts: what differs from the shared version, for the submit gates ----------
 // Read-only: compares this workflow's folder with the shared branch using only local Git data (no network). The MCP server
 // decides what is allowed from these facts (see mcp/submit.mjs); this command only reports.
+// Runs Git in the repository. Never asks for a password (a missing login fails at once instead of hanging).
+const gitRun = (a, { env = {}, timeout } = {}) => {
+  const r = spawnSync("git", ["-c", "core.quotepath=false", ...a], {
+    cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env },
+  });
+  return { ok: r.status === 0, out: r.stdout ?? "", err: r.stderr ?? "" };
+};
+const SUBMISSIONS_FILE = path.join(WORK, "submissions.json");
+const readSubmissions = () => { try { const r = JSON.parse(fs.readFileSync(SUBMISSIONS_FILE, "utf8")); return Array.isArray(r) ? r : []; } catch { return []; } };
+
 function runSubmitFacts() {
   const out = (obj, code) => { console.log(JSON.stringify(obj)); return code; };
-  const git = (...a) => {
-    const r = spawnSync("git", ["-c", "core.quotepath=false", ...a], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-    return { ok: r.status === 0, out: r.stdout ?? "" };
-  };
+  const git = (...a) => gitRun(a);
   const lines = (s) => s.split(/\r?\n/).filter(Boolean);
   if (!git("--version").ok) return out({ state: "no-git" }, 2);
   if (!git("rev-parse", "--is-inside-work-tree").ok) return out({ state: "no-repo" }, 2);
+  // --fetch refreshes from the team's repository first, so "shared" is current. It only downloads; it never changes
+  // anything there. If it fails (offline, not signed in) the comparison carries on with what is already here.
+  let fetched = null;
+  if (args.includes("--fetch") && git("remote", "get-url", "origin").ok) fetched = gitRun(["fetch", "--prune", "--quiet", "origin"], { timeout: 30000 }).ok;
   const base = ["origin/main", "main"].find((r) => git("rev-parse", "--verify", "--quiet", r).ok);
   if (!base) return out({ state: "no-base" }, 2);
   const dir = rel(wfDir);
@@ -573,7 +587,58 @@ function runSubmitFacts() {
   };
   const tests = files.filter((f) => f.path.startsWith(`${dir}/tests/`) && /\.ya?ml$/.test(f.path) && !f.path.slice(dir.length + 7).includes("/"))
     .map((f) => ({ ...f, name: testName(f.path, f.status) }));
-  return out({ state: "facts", base, dir, files, workflowChanged: status.has(wfPath), newWorkflow, workflowChanges, tests }, 0);
+  // Has the shared version of this workflow moved since the person's copy was taken? If so, sending theirs would undo that.
+  const mb = git("merge-base", "HEAD", base);
+  const sharedChanged = mb.ok && !git("diff", "--quiet", "--ignore-cr-at-eol", mb.out.trim(), base, "--", dir).ok;
+  // Earlier submissions from this computer, and whether each is still waiting: its branch still exists and is not merged.
+  const submissions = readSubmissions().slice(-50).map((r) => ({
+    workflow: r.workflow, branch: r.branch, at: r.at,
+    open: git("rev-parse", "--verify", "--quiet", `refs/remotes/origin/${r.branch}`).ok && !git("merge-base", "--is-ancestor", r.commit, base).ok,
+  }));
+  return out({ state: "facts", base, dir, files, workflowChanged: status.has(wfPath), newWorkflow, workflowChanges, tests, fetched, sharedChanged, submissions }, 0);
+}
+
+// ---------- submit: send a finished change to the team's repository for review ----------
+// Builds ONE commit on top of the shared branch that contains only this workflow's folder as it is now, and pushes that
+// commit to a NEW branch named n8n-dev/<something>. Nothing local moves: no checkout, no branch, no change to the working
+// files or the index. It never pushes to the shared branch and never forces anything. The decision to send is the MCP
+// server's (mcp/submit.mjs); this only does the mechanics, with its own hard limits.
+const BRANCH_RE = /^n8n-dev\/[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/;
+function runSubmit() {
+  const out = (obj, code) => { console.log(JSON.stringify(obj)); return code; };
+  const branch = flag("--branch"), message = flag("--message");
+  if (!BRANCH_RE.test(branch ?? "")) return out({ state: "bad-branch" }, 2);
+  if (!message || message.length > 2000) return out({ state: "bad-message" }, 2);
+  const dir = rel(wfDir);
+  if (dir.startsWith("..") || path.isAbsolute(dir) || !fs.existsSync(path.join(wfDir, "workflow.json"))) return out({ state: "bad-workflow" }, 2);
+  const git = (...a) => gitRun(a);
+  if (!git("--version").ok) return out({ state: "no-git" }, 2);
+  if (!git("rev-parse", "--is-inside-work-tree").ok) return out({ state: "no-repo" }, 2);
+  const remote = git("remote", "get-url", "origin");
+  if (!remote.ok) return out({ state: "no-remote" }, 2);
+  const base = ["origin/main", "main"].find((r) => git("rev-parse", "--verify", "--quiet", r).ok);
+  if (!base) return out({ state: "no-base" }, 2);
+  if (!git("config", "user.name").out.trim() || !git("config", "user.email").out.trim()) return out({ state: "no-identity" }, 2);
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "n8n-dev-index-"));
+  try {
+    const env = { GIT_INDEX_FILE: path.join(tmp, "index") };            // a private index: the real one is never touched
+    const step = (...a) => gitRun(a, { env });
+    const baseSha = git("rev-parse", base).out.trim();
+    if (!step("read-tree", baseSha).ok) return out({ state: "failed", details: "read-tree" }, 1);
+    step("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", dir);
+    if (!step("add", "-A", "--", dir).ok) return out({ state: "failed", details: "add" }, 1);
+    const tree = step("write-tree").out.trim();
+    if (tree === git("rev-parse", `${baseSha}^{tree}`).out.trim()) return out({ state: "nothing" }, 0);
+    const commit = gitRun(["commit-tree", tree, "-p", baseSha, "-m", message]).out.trim();
+    if (!commit) return out({ state: "failed", details: "commit-tree" }, 1);
+    // A plain push of one commit to a new branch: no --force, no shared branch, no tags.
+    const pushed = gitRun(["push", "origin", `${commit}:refs/heads/${branch}`], { timeout: 120000 });
+    if (!pushed.ok) return out({ state: "push-failed", details: pushed.err.trim().slice(-300) }, 1);
+    fs.mkdirSync(WORK, { recursive: true });
+    fs.writeFileSync(SUBMISSIONS_FILE, JSON.stringify([...readSubmissions(), { workflow: dir, branch, commit, at: new Date().toISOString() }].slice(-200), null, 2));
+    return out({ state: "sent", workflow: dir, branch, base, commit, remoteUrl: remote.out.trim() }, 0);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 }
 
 // ---------- report ----------
@@ -607,14 +672,15 @@ if (cmd === "undo") process.exit(runUndo());
 if (cmd === "status") {   // is a sealed editor still open? Exit 0 = clean, 1 = something is there, 2 = could not tell
   process.exit(spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" }).status ?? 2);
 }
-if (!["scan", "structure", "test", "check", "ui", "tests-fix", "submit-facts"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix|submit-facts> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | undo [--json] | status");
+if (!["scan", "structure", "test", "check", "ui", "tests-fix", "submit-facts", "submit"].includes(cmd) || !wfDir) {
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix|submit-facts|submit> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | undo [--json] | status");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
 if (cmd === "ui") { openUi(wf); process.exit(0); }
 if (cmd === "tests-fix") process.exit(runTestsFix(wf));
 if (cmd === "submit-facts") process.exit(runSubmitFacts());
+if (cmd === "submit") process.exit(runSubmit());
 const s =["scan", "check"].includes(cmd) ? scan(wf) : null;
 const st = ["structure", "check"].includes(cmd) ? structure(wf) : null;
 const tests = ["test", "check"].includes(cmd) ? runTests(wf) : null;
