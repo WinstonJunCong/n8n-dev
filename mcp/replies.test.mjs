@@ -4,13 +4,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JARGON, describeChanges, describeNotApplied, plainAssertion,
-  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForPreview, replyForApply, replyForStatus,
+  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForPreview, replyForApply, replyForStatus,
 } from "./replies.mjs";
 
 // The part of a reply meant for the person: without the line for the assistant and the support details.
 const forPerson = (text) => text.split("For you, the assistant")[0].split("Technical details (for support)")[0];
 // "Docker Desktop" is a program the person has to open, so its name is allowed; nothing else technical is.
-const lintable = (text) => forPerson(text).replace(/Docker Desktop/g, "");
+// A review link is an address, not wording: it is allowed to contain words like "pull".
+const lintable = (text) => forPerson(text).replace(/Docker Desktop/g, "").replace(/https?:\/\/\S+/g, "");
 
 const CHANGES = [{ kind: "changed", node: "Compose alert", details: [{ label: "text", from: "ALERT: down", to: "TEST: down" }] }];
 const FACTS = { workflow: "workflows/site-health-alert", changes: CHANGES, notApplied: [], notes: [], missing: [], conflicts: [], changedMeanwhile: false };
@@ -210,7 +211,10 @@ const everyReply = () => {
   out.push(replyForStopRefused("too-soon"), replyForStopRefused("no-words"));
   const facts = { workflowChanged: true, newWorkflow: false, workflowChanges: rich.changes, tests: [{ status: "A", name: "N" }, { status: "D", name: "O" }, { status: "M", name: null }] };
   out.push(replyForSubmitPreview({ state: "ready", testsChanged: true, testsRemoved: true, noTestReason: "a typo" }, facts, "1"), replyForSubmitPreview({ state: "ready", testsChanged: false, testsRemoved: false, noTestReason: "a typo" }, { ...facts, tests: [] }, "1"));
-  for (const code of ["editor-open", "editor-unknown", "no-check", "check-stale", "check-failed", "no-change", "other-files", "workflow-without-test", "reason-too-long", "no-git", "no-repo", "no-base", "no-facts", "other"]) out.push(replyForSubmitPreview({ state: "blocked", reasons: [{ code, count: 1 }] }, facts));
+  for (const code of ["editor-open", "editor-unknown", "no-check", "check-stale", "check-failed", "no-change", "other-files", "workflow-without-test", "reason-too-long", "no-git", "no-repo", "no-base", "no-facts", "shared-changed", "open-submission", "rate-limit", "other"]) out.push(replyForSubmitPreview({ state: "blocked", reasons: [{ code, count: 1, max: 3 }] }, facts));
+  out.push(replyForSubmitPreview({ state: "ready", testsChanged: true, testsRemoved: false, noTestReason: null }, { ...facts, fetched: false }, "1"), replyForSubmitRefused("too-soon"), replyForSubmitRefused("no-words"));
+  out.push(replyForSend({ state: "sent" }, "https://github.com/acme/flows/pull/new/n8n-dev/demo-20261018-0705"), replyForSend({ state: "sent" }, null));
+  for (const state of ["nothing", "push-failed", "no-identity", "no-remote", "no-git", "no-repo", "no-base", "failed", "bad-branch"]) out.push(replyForSend({ state, details: "fatal: could not read Username" }, null));
   for (const state of ["ready", "nothing", "unexplained", "no-change", "wrong-workflow", "failed", "other"]) out.push(replyForTestFix({ state, updates: [{ test: "Down", from: "a", to: "b" }], unexplained: [{ test: "Other", reason: "unrelated", assertion: 'node "N" called 1 time', detail: "called 0 time(s)" }, { test: "B", reason: "error" }], expected: "a", given: "b" }, "1"));
   for (const state of ["applied", "write-failed", "ready"]) out.push(replyForTestUpdate({ state, updates: [{ test: "Down", from: "a", to: "b" }], unexplained: [] }));
   for (const state of ["restored", "no-words", "nothing-to-undo", "already-undone", "changed-since", "missing", "write-failed", "other"]) out.push(replyForUndo({ state, changes: rich.changes }));
@@ -329,4 +333,49 @@ test("every reason a change cannot be sent has a plain sentence, and only Git pr
   }
   assert.match(replyForSubmitPreview({ state: "blocked", reasons: [{ code: "other-files", count: 2 }] }, {}).text, /2 other files changed/);
   assert.match(replyForSubmitPreview({ state: "blocked", reasons: [{ code: "no-check" }] }, {}).text, /call check_workflow/);
+});
+
+// ---------- sending ----------
+test("a sent change gives the review link, says it is not live yet, and keeps technical details out of sight", () => {
+  const link = "https://github.com/acme/flows/pull/new/n8n-dev/demo-20261018-0705";
+  const r = replyForSend({ state: "sent" }, link);
+  assert.equal(r.isError, false);
+  assert.match(r.text, /Sent for review\. It is not live/);
+  assert.match(r.text, new RegExp(link.replace(/[/.]/g, "\\$&")));
+  assert.match(replyForSend({ state: "sent" }, null).text, /let a colleague know/);
+});
+
+test("each way sending can fail has a plain reply; only 'nothing to send' is not an error", () => {
+  for (const state of ["nothing", "push-failed", "no-identity", "no-remote", "no-git", "no-repo", "no-base", "failed", "bad-branch"]) {
+    const r = replyForSend({ state, details: "fatal: could not read Username for 'https://github.com'" }, null);
+    assert.ok(forPerson(r.text).length > 30, state);
+    assert.equal(r.isError, state !== "nothing", state);
+  }
+  assert.match(replyForSend({ state: "push-failed", details: "fatal: x" }).text, /Technical details \(for support\): fatal: x/);
+  assert.doesNotMatch(forPerson(replyForSend({ state: "push-failed", details: "fatal: x" }).text), /fatal/);
+});
+
+test("a refused send tells the assistant to wait for the person", () => {
+  for (const why of ["too-soon", "no-words"]) {
+    const r = replyForSubmitRefused(why);
+    assert.equal(r.isError, true);
+    assert.match(r.text, /For you, the assistant/);
+  }
+  assert.match(forPerson(replyForSubmitRefused("too-soon").text), /go-ahead first/);
+});
+
+test("the ready preview asks the person and tells the assistant to stop and wait before calling submit", () => {
+  const r = replyForSubmitPreview({ state: "ready", testsChanged: false, testsRemoved: false, noTestReason: null }, { workflowChanged: true, workflowChanges: CHANGES, tests: [] }, "909090");
+  assert.match(forPerson(r.text), /If you'd like me to send it for review, say so/);
+  assert.match(r.text, /For you, the assistant.*STOP.*submit.*theirWords/s);
+  assert.match(forPerson(replyForSubmitPreview({ state: "ready", testsChanged: false, testsRemoved: false, noTestReason: null }, { workflowChanged: true, workflowChanges: CHANGES, tests: [], fetched: false }, "1").text), /couldn't reach the team's repository/);
+});
+
+test("the new reasons a change cannot go are plain and not errors", () => {
+  for (const code of ["shared-changed", "open-submission", "rate-limit"]) {
+    const r = replyForSubmitPreview({ state: "blocked", reasons: [{ code, max: 3 }] }, {});
+    assert.equal(r.isError, false, code);
+    assert.ok(forPerson(r.text).length > 60, code);
+  }
+  assert.match(replyForSubmitPreview({ state: "blocked", reasons: [{ code: "rate-limit", max: 3 }] }, {}).text, /already sent 3 changes/);
 });

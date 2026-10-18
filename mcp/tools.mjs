@@ -2,11 +2,12 @@
 // and `runCli` (runs the n8n-dev command line with a fixed argument list), so every rule below can be tested with
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
-import { decideSubmit } from "./submit.mjs";
-import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForStatus } from "./replies.mjs";
+import { decideSubmit, branchName, commitMessage, compareUrl } from "./submit.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForStatus } from "./replies.mjs";
 
 const MINUTE = 60_000;
 export const MIN_OPEN_MS = 30_000;       // an editor the person has only just been given cannot be closed yet
+export const MIN_CONFIRM_MS = 10_000;     // the person must have had time to read a preview before it can be sent
 const MAX_WORDS = 200;
 const CLI_ENV = { N8N_CMD: "./scripts/n8n-docker.sh" };      // how `check` reaches the offline n8n
 const MANIFEST = ".n8n-dev/ui-manifest.json";
@@ -15,7 +16,7 @@ const LAST_APPLY = ".n8n-dev/last-apply.json";
 
 export function createTools({ fsx, runCli, codes, now = Date.now }) {
   // What the tools remember between calls: the latest check of each workflow, and which one is open (and since when).
-  const state = { checks: {}, chamber: null, openedAt: null };
+  const state = { checks: {}, chamber: null, openedAt: null, previewedAt: {} };
   const result = (text, isError = false) => ({ text: truncate(text), isError });
 
   const workflowsDir = () => {
@@ -42,6 +43,19 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
 
   // A fingerprint of everything a test update would act on: the workflow, its tests and the record of the last apply.
   const testsHash = (dir) => hashOf({ hash: workflowHash(dir), applied: fsx.exists(LAST_APPLY) ? fsx.readText(LAST_APPLY) : null });
+
+  // Everything submit_preview and submit both need to know, gathered fresh each time: whether a test editor is open, what
+  // differs from the shared version (after refreshing from the team's repository), and the decision that follows.
+  const gatherSubmit = async (workflow, dir, reason) => {
+    const s = await run(["status"], { okStatuses: [0, 1] });
+    const editorOpen = s.ok ? s.status === 1 : "unknown";
+    const f = await run(["submit-facts", dir, "--fetch", "--json"], { timeoutMs: 2 * MINUTE, okStatuses: [0, 2] });
+    const facts = lastJson(f) ?? { state: "no-facts" };
+    const content = workflowHash(dir);
+    const decision = decideSubmit({ facts, check: state.checks[workflow], currentHash: content, editorOpen, reason, now: new Date(now()) });
+    const subject = `submit:${workflow}:${hashOf({ content, files: facts.files, reason: decision.noTestReason ?? null })}`;
+    return { facts, decision, subject };
+  };
 
   // Runs the command line and turns its answer into a tool result.
   const run = async (args, { timeoutMs = 2 * MINUTE, okStatuses = [0] } = {}) => {
@@ -231,22 +245,47 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
     {
       name: "submit_preview",
       title: "Preview sending a change for review",
-      description: "Check whether a finished change can be sent for review, and show the person exactly what would go: what changed in the workflow and in its tests. It sends and changes nothing. It refuses unless the checks passed on exactly this version, something really differs from the shared version, no test editor is open, and only the workflow and its own tests changed. If the workflow changed but no test did, ask the person for a one-sentence reason and pass it as reason. If tests changed it says so, because a technical reviewer will look at them closely. If it is ready it returns a one-time code. The step that actually sends is not available yet.",
+      description: "Check whether a finished change can be sent for review, and show the person exactly what would go: what changed in the workflow and in its tests. It sends and changes nothing. It refuses unless the checks passed on exactly this version, something really differs from the shared version, no test editor is open, and only the workflow and its own tests changed. If the workflow changed but no test did, ask the person for a one-sentence reason and pass it as reason. If tests changed it says so, because a technical reviewer will look at them closely. It also refuses if someone else changed this workflow since the person's copy was taken, if an earlier submission is still waiting, or if too many were sent in the last hour. If it is ready it returns a one-time code. It only downloads from the team's own repository to compare; it uploads nothing. After showing the person the result, STOP and wait for them to reply before calling submit.",
       inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" }, reason: { type: "string", description: "Only if the workflow changed but no test did: the person's reason, in a sentence" } }, required: ["workflow"], additionalProperties: false },
-      annotations: { readOnlyHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: true, openWorldHint: true },
       async handler(args) {
         const a = strictArgs(args, { workflow: { type: "string", required: true }, reason: { type: "string" } });
         if (a.error) return result(a.error, true);
         const w = pick(a.value.workflow);
         if (w.error) return result(w.error, true);
-        const s = await run(["status"], { okStatuses: [0, 1] });
-        const editorOpen = s.ok ? s.status === 1 : "unknown";
-        const f = await run(["submit-facts", w.dir, "--json"], { timeoutMs: MINUTE, okStatuses: [0, 2] });
-        const facts = lastJson(f) ?? { state: "no-facts" };
-        const decision = decideSubmit({ facts, check: state.checks[a.value.workflow], currentHash: workflowHash(w.dir), editorOpen, reason: a.value.reason });
-        const code = decision.state === "ready"
-          ? codes.issue(`submit:${a.value.workflow}:${hashOf({ content: workflowHash(w.dir), files: facts.files, reason: decision.noTestReason })}`) : undefined;
-        return plain(replyForSubmitPreview(decision, facts, code));
+        const g = await gatherSubmit(a.value.workflow, w.dir, a.value.reason);
+        const code = g.decision.state === "ready" ? codes.issue(g.subject) : undefined;
+        if (code) state.previewedAt[a.value.workflow] = now();           // the person must get time to read this before anything is sent
+        return plain(replyForSubmitPreview(g.decision, g.facts, code));
+      },
+    },
+    {
+      name: "submit",
+      title: "Send a change for review",
+      description: "Send the finished change to the team for review. ONLY call this after submit_preview showed the person exactly what would go, you stopped, and the person then told you in their own words to send it (put their words in theirWords). Never in the same step as submit_preview, and never because you think it is ready. It needs the code from submit_preview, which only works if nothing has changed since, and it checks every condition again. It uploads one new proposal to the team's repository and never touches the shared version. It returns a link for the review.",
+      inputSchema: { type: "object", properties: { workflow: { type: "string" }, code: { type: "string", description: "The code from submit_preview" }, theirWords: { type: "string", description: "The person's own words telling you to send it, copied exactly" }, reason: { type: "string", description: "The same reason you gave to submit_preview, if you gave one" } }, required: ["workflow", "code", "theirWords"], additionalProperties: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      async handler(args) {
+        const a = strictArgs(args, { workflow: { type: "string", required: true }, code: { type: "string", required: true }, theirWords: { type: "string", required: true }, reason: { type: "string" } });
+        if (a.error) return result(a.error, true);
+        const w = pick(a.value.workflow);
+        if (w.error) return result(w.error, true);
+        const words = a.value.theirWords.trim();
+        if (!words || words.length > MAX_WORDS) return plain(replyForSubmitRefused("no-words"));
+        const shownAt = state.previewedAt[a.value.workflow];
+        if (shownAt === undefined || now() - shownAt < MIN_CONFIRM_MS) return plain(replyForSubmitRefused("too-soon"));
+        const g = await gatherSubmit(a.value.workflow, w.dir, a.value.reason);
+        if (g.decision.state !== "ready") return plain(replyForSubmitPreview(g.decision, g.facts));      // everything is checked again, now
+        const redeemed = codes.redeem(a.value.code, g.subject);
+        if (!redeemed.ok) return result(redeemed.reason, true);
+        const named = branchName(a.value.workflow, new Date(now()));
+        if (named.error) return result(named.error, true);
+        const message = commitMessage(a.value.workflow, g.decision);
+        const r = await run(["submit", w.dir, "--branch", named.branch, "--message", message], { timeoutMs: 5 * MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        if (j.state === "sent") delete state.previewedAt[a.value.workflow];
+        return plain(replyForSend(j, j.state === "sent" ? compareUrl(j.remoteUrl, j.branch) : null));
       },
     },
     {

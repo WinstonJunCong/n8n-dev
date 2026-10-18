@@ -84,13 +84,13 @@ const realTools = () => createTools({
 test("registerAll registers every tool with its title, description, strict schema and annotations", () => {
   const registered = [];
   registerAll({ registerTool: (name, config, cb) => registered.push({ name, config, cb }) }, realTools());
-  assert.equal(registered.length, 11);
+  assert.equal(registered.length, 12);
   for (const r of registered) {
     assert.ok(r.config.title && r.config.title.length > 3, `${r.name} needs a title`);
     assert.ok(r.config.description.length > 30, r.name);
     assert.equal(typeof r.cb, "function");
     assert.equal(z.toJSONSchema(r.config.inputSchema).additionalProperties, false, `${r.name} must reject unknown arguments`);
-    assert.equal(r.config.annotations.openWorldHint, false, r.name);
+    assert.equal(r.config.annotations.openWorldHint, ["submit", "submit_preview"].includes(r.name), r.name);
   }
 });
 

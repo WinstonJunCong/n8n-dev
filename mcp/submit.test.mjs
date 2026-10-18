@@ -94,3 +94,52 @@ test("a submission is always on a new branch named after the workflow, never the
   assert.ok(branchName("ok", new Date("nope")).error);
   assert.ok(branchName("ok", "2026-10-18").error);
 });
+
+// ---------- the new gates, the review link and the note that travels with the change ----------
+import { compareUrl, commitMessage, MAX_PER_HOUR } from "./submit.mjs";
+
+const NOW = new Date("2026-10-18T12:00:00Z");
+const minsAgo = (m) => new Date(NOW.getTime() - m * 60_000).toISOString();
+const withExtra = (extra) => decideSubmit({ facts: facts([{ path: WF, status: "M" }, { path: T1, status: "M" }], extra), check: GOOD_CHECK, currentHash: "h1", editorOpen: false, now: NOW });
+
+test("a shared version that moved since the copy was taken blocks the send", () => {
+  assert.deepEqual(codes(withExtra({ sharedChanged: true })), ["shared-changed"]);
+  assert.equal(withExtra({ sharedChanged: false }).state, "ready");
+});
+
+test("an earlier submission still waiting for this workflow blocks another one; closed, old or other-workflow ones do not", () => {
+  const sub = (over) => ({ workflow: DIR, branch: "n8n-dev/x", at: minsAgo(500), open: true, ...over });
+  assert.deepEqual(codes(withExtra({ submissions: [sub()] })), ["open-submission"]);
+  assert.equal(withExtra({ submissions: [sub({ open: false })] }).state, "ready");
+  assert.equal(withExtra({ submissions: [sub({ workflow: "workflows/other" })] }).state, "ready");
+});
+
+test("at most three changes an hour, counted across every workflow", () => {
+  const sent = (n, mins) => Array.from({ length: n }, (_, i) => ({ workflow: `workflows/w${i}`, branch: `n8n-dev/w${i}`, at: minsAgo(mins + i), open: false }));
+  assert.equal(MAX_PER_HOUR, 3);
+  assert.deepEqual(codes(withExtra({ submissions: sent(3, 5) })), ["rate-limit"]);
+  assert.equal(withExtra({ submissions: sent(2, 5) }).state, "ready", "two is fine");
+  assert.equal(withExtra({ submissions: sent(3, 61) }).state, "ready", "older than an hour does not count");
+  assert.equal(withExtra({ submissions: [{ workflow: "w", branch: "b", at: "not a date", open: false }, ...sent(2, 5)] }).state, "ready", "an unreadable date does not count");
+});
+
+test("the review link is built only for a GitHub address, and never carries a login", () => {
+  const branch = "n8n-dev/demo-20261018-0705";
+  const want = `https://github.com/acme/flows/pull/new/${branch}`;
+  for (const url of ["https://github.com/acme/flows.git", "https://github.com/acme/flows", "https://github.com/acme/flows/", "git@github.com:acme/flows.git", "ssh://git@github.com/acme/flows.git", "https://someone:secret-token@github.com/acme/flows.git"]) {
+    assert.equal(compareUrl(url, branch), want, url);
+  }
+  assert.ok(!compareUrl("https://someone:secret-token@github.com/acme/flows.git", branch).includes("secret"));
+  for (const url of ["https://gitlab.com/acme/flows.git", "https://evil.example/github.com/acme/flows", "https://github.com.evil.example/acme/flows", "/local/path/team.git", "", undefined, "https://github.com/acme", "https://github.com/acme/flows/extra/path"]) {
+    assert.equal(compareUrl(url, branch), null, String(url));
+  }
+  for (const bad of ["main", "n8n-dev/", "n8n-dev/a b", "x/y", undefined]) assert.equal(compareUrl("https://github.com/acme/flows.git", bad), null, String(bad));
+});
+
+test("the note that travels with the change says what a reviewer should look at, and carries the reason", () => {
+  assert.equal(commitMessage("demo"), "Update demo\n\nSent for review with n8n-dev.");
+  assert.match(commitMessage("demo", { testsChanged: true }), /Tests were changed: please read them closely/);
+  assert.match(commitMessage("demo", { testsChanged: true, testsRemoved: true }), /Tests were removed: please check why/);
+  assert.doesNotMatch(commitMessage("demo", { testsChanged: true, testsRemoved: true }), /changed: please read/);
+  assert.match(commitMessage("demo", { noTestReason: "Only a typo" }), /No test changed\. Reason given: Only a typo/);
+});
