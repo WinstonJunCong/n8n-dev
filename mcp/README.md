@@ -36,8 +36,10 @@ It is a **thin, guarded wrapper over the same command line** you can run yoursel
 | `submit_preview` | Shows exactly what would be sent for review and whether every gate passes; sends nothing (the send step is next) |
 | `submit` | Sends the previewed change to the team for review as a new proposal (needs the code and the person's own words); returns the review link |
 | `undo_change` | Puts the workflow back as it was before the last applied change (one step, only if untouched since) |
+| `ui_resume` | Brings back an editor left over from earlier (stopped by a restart or still running) with its changes, if the workflow has not moved on |
+| `ui_discard` | Throws away an earlier editor and changes saved from it that were never applied (needs the person's own words); never touches the workflow or its tests |
 | `ui_stop` | Only when the person says they are finished (their words are required, and not within 30 s of opening): saves any edits, closes the editor, and summarises what changed |
-| `status` | Says whether a sealed editor is still open |
+| `status` | Reports an editor, or saved changes never applied, left over from earlier, how old they are, and the choices; changes nothing |
 | `pull_preview` | Shows which edits would be applied to `workflow.json`; changes nothing |
 | `pull_apply` | Applies them, only with the one-time code from a preview of the same content |
 
