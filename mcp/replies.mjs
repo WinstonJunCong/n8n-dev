@@ -227,6 +227,53 @@ export function replyForTestUpdate(j) {
   return replyForTestFix(j);
 }
 
+// ---------- sending a change for review ----------
+const SUBMIT_BLOCKS = {
+  "editor-open": () => "The test editor is still open. Tell me when you've finished with it and I'll close it first.",
+  "editor-unknown": () => "I can't tell whether the test editor is still open. Is Docker Desktop running?",
+  "no-check": () => "I haven't checked this version yet.",
+  "check-stale": () => "Something changed since the last check, so I need to check again.",
+  "check-failed": () => "The latest check failed, so this can't be sent for review yet. It needs fixing first, or I can undo the change.",
+  "no-change": () => "There is nothing different from the shared version, so there is nothing to send.",
+  "other-files": (r) => `Besides the workflow and its tests, ${r.count} other file${r.count === 1 ? "" : "s"} changed. I only send a workflow and its own tests, so those need a colleague.`,
+  "workflow-without-test": () => "You changed the workflow, but no test goes with it. Changes to what a workflow does should come with a test. If there is a good reason there isn't one, tell me why and I'll pass the reason on to the reviewer.",
+  "reason-too-long": () => "That reason is too long. Please give it in a sentence or two.",
+  "no-git": () => "The tool that keeps track of changes isn't installed on this computer, so I can't send changes for review.",
+  "no-repo": () => "This folder isn't set up for sharing changes, so I can't send anything for review.",
+  "no-base": () => "I can't find the shared version to compare with, so I can't tell what is different.",
+  "no-facts": () => "I couldn't work out what is different from the shared version.",
+};
+const SUBMIT_HINTS = { "no-check": "call check_workflow", "check-stale": "call check_workflow", "editor-open": "ask whether they have finished with the editor; call ui_stop only with their own words", "workflow-without-test": "ask the person for a one-sentence reason, then call submit_preview again with it as reason" };
+const GIT_PROBLEMS = new Set(["no-git", "no-repo", "no-base", "no-facts"]);
+
+const testLine = (t) => {
+  const name = t.name ? q(t.name) : "a test";
+  if (t.status === "A") return `A new test: ${name}`;
+  if (t.status === "D") return `The test ${name} was removed`;
+  return `The test ${name} was changed`;
+};
+
+export function replyForSubmitPreview(decision, facts, code) {
+  if (decision.state === "blocked") {
+    const lines = decision.reasons.map((r) => (SUBMIT_BLOCKS[r.code] ?? (() => "Something stops this from being sent."))(r));
+    const hint = decision.reasons.map((r) => SUBMIT_HINTS[r.code]).filter(Boolean)[0];
+    return reply(`This can't be sent for review yet:\n${bullets(lines)}`, hint, decision.reasons.some((r) => GIT_PROBLEMS.has(r.code)));
+  }
+  const parts = ["Everything is in order to send this for review. This is what would go:"];
+  if (facts.newWorkflow) parts.push("A brand new workflow.");
+  else if (facts.workflowChanged) {
+    const lines = describeChanges(facts.workflowChanges ?? []);
+    parts.push(`What changed in the workflow:\n${bullets(lines.length ? lines : ["The workflow was changed."])}`);
+  }
+  if (facts.tests?.length) parts.push(`Tests:\n${bullets(facts.tests.map(testLine))}`);
+  parts.push("The checks passed on exactly this version.");
+  if (decision.testsRemoved) parts.push("Tests were removed. The reviewer will want to know why.");
+  else if (decision.testsChanged) parts.push("Because tests were changed, a technical reviewer will look at those closely before anything goes live.");
+  if (decision.noTestReason) parts.push(`No test changed. You told me why: ${q(decision.noTestReason)}.`);
+  parts.push("Nothing has been sent yet.");
+  return reply(parts.join("\n\n"), `the one-time code is ${code}; the step that actually sends it is not available in this version yet, so tell the person it is coming`);
+}
+
 // ---------- checks and status ----------
 const ASSERT = [
   [/^node "(.+)" called (\d+) times?$/, (m, d) => `${q(m[1])} should have run ${m[2]} time${m[2] === "1" ? "" : "s"}${d ? ` but ${String(d).replace(/^called (\d+) time\(s\)$/, "ran $1 time(s)")}` : ""}`],
