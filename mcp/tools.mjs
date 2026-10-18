@@ -2,7 +2,8 @@
 // and `runCli` (runs the n8n-dev command line with a fixed argument list), so every rule below can be tested with
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
-import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForStatus } from "./replies.mjs";
+import { decideSubmit } from "./submit.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForStatus } from "./replies.mjs";
 
 const MINUTE = 60_000;
 export const MIN_OPEN_MS = 30_000;       // an editor the person has only just been given cannot be closed yet
@@ -225,6 +226,27 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
         if (!j) return result(unclear, true);
         if (j.state === "applied") delete state.checks[a.value.workflow];
         return plain(replyForTestUpdate(j));
+      },
+    },
+    {
+      name: "submit_preview",
+      title: "Preview sending a change for review",
+      description: "Check whether a finished change can be sent for review, and show the person exactly what would go: what changed in the workflow and in its tests. It sends and changes nothing. It refuses unless the checks passed on exactly this version, something really differs from the shared version, no test editor is open, and only the workflow and its own tests changed. If the workflow changed but no test did, ask the person for a one-sentence reason and pass it as reason. If tests changed it says so, because a technical reviewer will look at them closely. If it is ready it returns a one-time code. The step that actually sends is not available yet.",
+      inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" }, reason: { type: "string", description: "Only if the workflow changed but no test did: the person's reason, in a sentence" } }, required: ["workflow"], additionalProperties: false },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, { workflow: { type: "string", required: true }, reason: { type: "string" } });
+        if (a.error) return result(a.error, true);
+        const w = pick(a.value.workflow);
+        if (w.error) return result(w.error, true);
+        const s = await run(["status"], { okStatuses: [0, 1] });
+        const editorOpen = s.ok ? s.status === 1 : "unknown";
+        const f = await run(["submit-facts", w.dir, "--json"], { timeoutMs: MINUTE, okStatuses: [0, 2] });
+        const facts = lastJson(f) ?? { state: "no-facts" };
+        const decision = decideSubmit({ facts, check: state.checks[a.value.workflow], currentHash: workflowHash(w.dir), editorOpen, reason: a.value.reason });
+        const code = decision.state === "ready"
+          ? codes.issue(`submit:${a.value.workflow}:${hashOf({ content: workflowHash(w.dir), files: facts.files, reason: decision.noTestReason })}`) : undefined;
+        return plain(replyForSubmitPreview(decision, facts, code));
       },
     },
     {

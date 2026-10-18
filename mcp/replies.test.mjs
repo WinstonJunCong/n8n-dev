@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JARGON, describeChanges, describeNotApplied, plainAssertion,
-  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForPreview, replyForApply, replyForStatus,
+  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForPreview, replyForApply, replyForStatus,
 } from "./replies.mjs";
 
 // The part of a reply meant for the person: without the line for the assistant and the support details.
@@ -208,6 +208,9 @@ const everyReply = () => {
   for (const state of ["already-running", "docker-missing", "no-tests", "bad-port", "build-failed", "failed", "x"]) out.push(replyForStart({ state, details: "docker: command not found" }));
   out.push(replyForStart({ state: "started", address: "http://127.0.0.1:5678", login: { email: "a@b.c", password: "p" } }));
   out.push(replyForStopRefused("too-soon"), replyForStopRefused("no-words"));
+  const facts = { workflowChanged: true, newWorkflow: false, workflowChanges: rich.changes, tests: [{ status: "A", name: "N" }, { status: "D", name: "O" }, { status: "M", name: null }] };
+  out.push(replyForSubmitPreview({ state: "ready", testsChanged: true, testsRemoved: true, noTestReason: "a typo" }, facts, "1"), replyForSubmitPreview({ state: "ready", testsChanged: false, testsRemoved: false, noTestReason: "a typo" }, { ...facts, tests: [] }, "1"));
+  for (const code of ["editor-open", "editor-unknown", "no-check", "check-stale", "check-failed", "no-change", "other-files", "workflow-without-test", "reason-too-long", "no-git", "no-repo", "no-base", "no-facts", "other"]) out.push(replyForSubmitPreview({ state: "blocked", reasons: [{ code, count: 1 }] }, facts));
   for (const state of ["ready", "nothing", "unexplained", "no-change", "wrong-workflow", "failed", "other"]) out.push(replyForTestFix({ state, updates: [{ test: "Down", from: "a", to: "b" }], unexplained: [{ test: "Other", reason: "unrelated", assertion: 'node "N" called 1 time', detail: "called 0 time(s)" }, { test: "B", reason: "error" }], expected: "a", given: "b" }, "1"));
   for (const state of ["applied", "write-failed", "ready"]) out.push(replyForTestUpdate({ state, updates: [{ test: "Down", from: "a", to: "b" }], unexplained: [] }));
   for (const state of ["restored", "no-words", "nothing-to-undo", "already-undone", "changed-since", "missing", "write-failed", "other"]) out.push(replyForUndo({ state, changes: rich.changes }));
@@ -296,4 +299,34 @@ test("each way a test explanation can end has a plain reply", () => {
   assert.match(replyForTestFix({ state: "failed" }).text, /Docker Desktop/);
   assert.match(replyForTestUpdate({ state: "applied", updates: [UPD] }).text, /now expects “OLALA: x” \(it used to expect “ALERT: x”\)/);
   assert.equal(replyForTestUpdate({ state: "write-failed" }).isError, true);
+});
+
+// ---------- sending a change for review ----------
+const SUBMIT_FACTS_PLAIN = { workflowChanged: true, newWorkflow: false, workflowChanges: CHANGES, tests: [{ status: "A", name: "New test" }, { status: "D", name: "Old test" }, { status: "M", name: null }] };
+
+test("a ready preview lists the workflow changes and every test in plain words, with the code only for the assistant", () => {
+  const r = replyForSubmitPreview({ state: "ready", testsChanged: true, testsRemoved: false, noTestReason: null }, SUBMIT_FACTS_PLAIN, "424242");
+  assert.match(r.text, /changed from “ALERT: down” to “TEST: down”/);
+  assert.match(r.text, /A new test: “New test”/);
+  assert.match(r.text, /The test “Old test” was removed/);
+  assert.match(r.text, /The test a test was changed|a test was changed/);
+  assert.match(forPerson(r.text), /Nothing has been sent yet/);
+  assert.doesNotMatch(forPerson(r.text), /424242/);
+  assert.match(r.text, /For you, the assistant.*424242/s);
+});
+
+test("removed tests and a brand new workflow are said plainly", () => {
+  assert.match(replyForSubmitPreview({ state: "ready", testsChanged: true, testsRemoved: true, noTestReason: null }, SUBMIT_FACTS_PLAIN, "1").text, /Tests were removed/);
+  assert.match(replyForSubmitPreview({ state: "ready", testsChanged: false, testsRemoved: false, noTestReason: null }, { newWorkflow: true, workflowChanged: true, tests: [] }, "1").text, /A brand new workflow/);
+});
+
+test("every reason a change cannot be sent has a plain sentence, and only Git problems are errors", () => {
+  const all = ["editor-open", "editor-unknown", "no-check", "check-stale", "check-failed", "no-change", "other-files", "workflow-without-test", "reason-too-long", "no-git", "no-repo", "no-base", "no-facts", "something-new"];
+  for (const code of all) {
+    const r = replyForSubmitPreview({ state: "blocked", reasons: [{ code, count: 2 }] }, {}, undefined);
+    assert.ok(forPerson(r.text).length > 40, code);
+    assert.equal(r.isError, ["no-git", "no-repo", "no-base", "no-facts"].includes(code), code);
+  }
+  assert.match(replyForSubmitPreview({ state: "blocked", reasons: [{ code: "other-files", count: 2 }] }, {}).text, /2 other files changed/);
+  assert.match(replyForSubmitPreview({ state: "blocked", reasons: [{ code: "no-check" }] }, {}).text, /call check_workflow/);
 });

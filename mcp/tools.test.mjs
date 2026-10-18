@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createTools, MIN_OPEN_MS } from "./tools.mjs";
-import { makeCodeStore } from "./guards.mjs";
+import { makeCodeStore, hashOf } from "./guards.mjs";
 
 // ---------- fakes ----------
 // An in-memory repository: a map from path to text.
@@ -61,7 +61,7 @@ const BAD_NAMES = ["../etc", "..", "a/b", "a\\b", "/abs", "a b", "", "x;rm -rf",
 // ---------- the tools as a set ----------
 test("every tool has a name, a plain description, a strict schema and annotations", () => {
   const { tools } = build();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "ui_start", "ui_stop", "undo_change", "update_tests"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit_preview", "ui_start", "ui_stop", "undo_change", "update_tests"]);
   for (const t of tools) {
     assert.ok(t.description.length > 30, t.name);
     assert.equal(t.inputSchema.type, "object", t.name);
@@ -75,12 +75,12 @@ test("only pull_apply, update_tests and undo_change are marked destructive, and 
   const { tools } = build();
   assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["pull_apply", "undo_change", "update_tests"]);
   assert.deepEqual(tools.filter((t) => t.annotations.readOnlyHint).map((t) => t.name).sort(),
-    ["check_workflow", "explain_test_failures", "list_workflows", "pull_preview", "status"]);
+    ["check_workflow", "explain_test_failures", "list_workflows", "pull_preview", "status", "submit_preview"]);
 });
 
 test("every tool that takes a workflow refuses bad names without running anything", async () => {
   const { byName, calls } = build();
-  for (const tool of ["check_workflow", "ui_start", "pull_preview", "explain_test_failures"]) {
+  for (const tool of ["check_workflow", "ui_start", "pull_preview", "explain_test_failures", "submit_preview"]) {
     for (const workflow of BAD_NAMES) {
       const r = await byName[tool].handler({ workflow });
       assert.equal(r.isError, true, `${tool} accepted ${JSON.stringify(workflow)}`);
@@ -508,4 +508,90 @@ test("an explanation with nothing to update does not even create a code behind t
   await ctx.byName.explain_test_failures.handler({ workflow: "site-health-alert" });
   const r = await ctx.byName.explain_test_failures.handler({ workflow: "site-health-alert" });
   assert.match(r.text, /code 100000\b/, "the first code ever issued, so the earlier answers issued none");
+});
+
+// ---------- submit_preview ----------
+const FILES = [{ path: "workflows/site-health-alert/workflow.json", status: "M" }, { path: "workflows/site-health-alert/tests/01-down.yaml", status: "M" }];
+const SUBMIT_FACTS = (over = {}) => say({
+  state: "facts", base: "origin/main", dir: "workflows/site-health-alert", files: FILES, workflowChanged: true, newWorkflow: false,
+  workflowChanges: CHANGES, tests: [{ path: FILES[1].path, status: "M", name: "Down site sends an alert" }], ...over,
+});
+const CLEAN = { status: 0, stdout: "CLEAN", out: "CLEAN", timedOut: false };
+// a context in which the check has passed on exactly the current content
+const checked = (answers) => {
+  const ctx = build({ files: repo(), answers });
+  ctx.state.checks["site-health-alert"] = { passed: true, hash: ctx.workflowHash("workflows/site-health-alert") };
+  return ctx;
+};
+const preview = (ctx, extra = {}) => ctx.byName.submit_preview.handler({ workflow: "site-health-alert", ...extra });
+
+test("submit_preview shows what would go, in plain words, sends nothing, and issues a one-time code", async () => {
+  const ctx = checked([CLEAN, SUBMIT_FACTS()]);
+  const r = await preview(ctx);
+  assert.equal(r.isError, false);
+  assert.deepEqual(ctx.calls.map((c) => c.args[0]), ["status", "submit-facts"]);
+  assert.deepEqual(ctx.calls[1].args, ["submit-facts", "workflows/site-health-alert", "--json"]);
+  assert.match(r.text, /Everything is in order to send this for review/);
+  assert.match(r.text, /changed from “ALERT: down” to “TEST: down”/);
+  assert.match(r.text, /The test “Down site sends an alert” was changed/);
+  assert.match(r.text, /Because tests were changed, a technical reviewer/);
+  assert.match(r.text, /Nothing has been sent yet/);
+  assert.match(r.text, /code 1000\d\d|is 1000\d\d/);
+});
+
+test("submit_preview refuses, and issues no code, for each missing piece of evidence", async () => {
+  const cases = [
+    [() => build({ answers: [CLEAN, SUBMIT_FACTS()] }), /haven't checked this version/],
+    [() => { const c = checked([CLEAN, SUBMIT_FACTS()]); c.state.checks["site-health-alert"].hash = "older"; return c; }, /need to check again/],
+    [() => { const c = checked([CLEAN, SUBMIT_FACTS()]); c.state.checks["site-health-alert"].passed = false; return c; }, /latest check failed/],
+    [() => checked([{ status: 1, stdout: "LEFTOVERS", out: "LEFTOVERS", timedOut: false }, SUBMIT_FACTS()]), /still open/],
+    [() => checked([{ status: 2, stdout: "UNKNOWN", out: "UNKNOWN", timedOut: false }, SUBMIT_FACTS()]), /Docker Desktop/],
+    [() => checked([CLEAN, SUBMIT_FACTS({ files: [], workflowChanged: false })]), /nothing different/],
+    [() => checked([CLEAN, SUBMIT_FACTS({ files: [...FILES, { path: "workflows/site-health-alert/notes.txt", status: "A" }] })]), /1 other file changed/],
+    [() => checked([CLEAN, SUBMIT_FACTS({ files: [FILES[0]], tests: [] })]), /no test goes with it/],
+    [() => checked([CLEAN, say({ state: "no-git" }, 2)]), /isn't installed/],
+    [() => checked([CLEAN, say({ state: "no-base" }, 2)]), /shared version/],
+    [() => checked([CLEAN, { status: 1, stdout: "garbage", out: "garbage" }]), /couldn't work out/],
+  ];
+  for (const [make, expected] of cases) {
+    const ctx = make();
+    const r = await preview(ctx);
+    assert.match(r.text, expected);
+    assert.doesNotMatch(r.text, /code \d{6}|is \d{6}/, expected.source);
+  }
+  // none of those cases created a code behind the scenes either: in one context, refusals first, then a ready one
+  const shared = checked([CLEAN, SUBMIT_FACTS({ files: [], workflowChanged: false }), CLEAN, say({ state: "no-base" }, 2), CLEAN, SUBMIT_FACTS()]);
+  await preview(shared);
+  await preview(shared);
+  assert.match((await preview(shared)).text, /100000\b/, "the first code ever issued, so the refusals issued none");
+});
+
+test("a workflow change with no test goes through only with the person's reason, which is shown back", async () => {
+  const noTest = () => SUBMIT_FACTS({ files: [FILES[0]], tests: [] });
+  const ctx = checked([CLEAN, noTest(), CLEAN, noTest()]);
+  assert.match((await preview(ctx)).text, /tell me why/);
+  const r = await preview(ctx, { reason: "Only a typo in a label" });
+  assert.match(r.text, /No test changed\. You told me why: “Only a typo in a label”/);
+  assert.doesNotMatch(r.text, /technical reviewer will look at those closely/);
+});
+
+test("the code is tied to the exact files and reason: a different list gives a code that cannot stand in for the first", async () => {
+  const more = SUBMIT_FACTS({ files: [...FILES, { path: "workflows/site-health-alert/tests/02-up.yaml", status: "A" }] });
+  const ctx = checked([CLEAN, SUBMIT_FACTS(), CLEAN, more]);
+  const first = (await preview(ctx)).text.match(/is (\d{6})/)[1];
+  const second = (await preview(ctx)).text.match(/is (\d{6})/)[1];
+  assert.notEqual(first, second);
+  // the code can be checked against what it was issued for: right for the first list, wrong for any other
+  const key = (files, reason) => `submit:site-health-alert:${hashOf({ content: ctx.workflowHash("workflows/site-health-alert"), files, reason })}`;
+  assert.equal(ctx.codes.redeem(first, key(more.stdout ? JSON.parse(more.stdout).files : [], null)).ok, false, "wrong file list");
+  assert.equal(ctx.codes.redeem(first, key(FILES, "a different reason")).ok, false, "wrong reason");
+  assert.equal(ctx.codes.redeem(first, key(FILES, null)).ok, true, "the exact files and reason it was issued for");
+});
+
+test("submit_preview rejects unexpected arguments and bad reasons before running anything", async () => {
+  const ctx = build();
+  for (const args of [{ workflow: "site-health-alert", reason: 5 }, { workflow: "site-health-alert", branch: "main" }, { workflow: "site-health-alert", reason: ["x"] }]) {
+    assert.equal((await ctx.byName.submit_preview.handler(args)).isError, true, JSON.stringify(args));
+  }
+  assert.equal(ctx.calls.length, 0);
 });

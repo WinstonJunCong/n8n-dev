@@ -8,6 +8,7 @@
 //   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
 //   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
 //   n8n-dev tests-fix <workflow-dir> [--apply] [--from-report f]  update tests that fail only because they expect the wording just changed (dry run unless --apply)
+//   n8n-dev submit-facts <workflow-dir>                          what differs from the shared branch (read-only, JSON), for the submit checks
 //   n8n-dev undo                                                put back workflow.json as it was before the last pull --apply (only if untouched since)
 //   n8n-dev status                                              is a sealed editor still open? (0 clean, 1 something is there, 2 unknown)
 //   --json (on check, pull, undo, ui --detach, ui-stop)               print the facts as one JSON object, for programs such as the MCP server
@@ -25,6 +26,7 @@ import { startVerdict, savedSince } from "./session.mjs";
 import { findBash } from "./shell.mjs";
 import { makeRecord, addTestEdits, decideUndo, safeRelative } from "./backup.mjs";
 import { planTestUpdates, rewriteTestText } from "./testfix.mjs";
+import { computePatch } from "./merge.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG = JSON.parse(fs.readFileSync(path.join(ROOT, "config/readiness.json"), "utf8"));
@@ -528,6 +530,52 @@ function runTestsFix(wf) {
   return out({ state: "applied", ...facts, message: "Updated." }, 0);
 }
 
+// ---------- submit-facts: what differs from the shared version, for the submit gates ----------
+// Read-only: compares this workflow's folder with the shared branch using only local Git data (no network). The MCP server
+// decides what is allowed from these facts (see mcp/submit.mjs); this command only reports.
+function runSubmitFacts() {
+  const out = (obj, code) => { console.log(JSON.stringify(obj)); return code; };
+  const git = (...a) => {
+    const r = spawnSync("git", ["-c", "core.quotepath=false", ...a], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    return { ok: r.status === 0, out: r.stdout ?? "" };
+  };
+  const lines = (s) => s.split(/\r?\n/).filter(Boolean);
+  if (!git("--version").ok) return out({ state: "no-git" }, 2);
+  if (!git("rev-parse", "--is-inside-work-tree").ok) return out({ state: "no-repo" }, 2);
+  const base = ["origin/main", "main"].find((r) => git("rev-parse", "--verify", "--quiet", r).ok);
+  if (!base) return out({ state: "no-base" }, 2);
+  const dir = rel(wfDir);
+  const status = new Map();
+  // --ignore-cr-at-eol: a file that differs only in Windows vs Unix line endings is not a change anyone made.
+  for (const line of lines(git("diff", "--name-status", "--no-renames", "--ignore-cr-at-eol", base, "--", dir).out)) {
+    const [s, ...p] = line.split("\t");
+    status.set(p.join("\t"), s[0]);
+  }
+  for (const p of lines(git("ls-files", "--others", "--exclude-standard", "--", dir).out)) status.set(p, "A");
+  const files = [...status].map(([p, s]) => ({ path: p, status: s })).sort((a, b) => a.path.localeCompare(b.path));
+
+  const wfPath = `${dir}/workflow.json`;
+  let workflowChanges = null, newWorkflow = false;
+  if (status.has(wfPath) && status.get(wfPath) !== "D") {
+    try {
+      const current = JSON.parse(fs.readFileSync(path.join(ROOT, wfPath), "utf8"));
+      const was = git("show", `${base}:${wfPath}`);
+      if (!was.ok) newWorkflow = true;
+      else {
+        const before = JSON.parse(was.out);
+        const patch = computePatch({ base: before, edited: current, simulatedIds: new Set() });
+        workflowChanges = planToJson({ real: before, merged: current, ops: patch.ops, skipped: [], warnings: [], missing: [], conflicts: [], drift: false }).changes;
+      }
+    } catch { /* unreadable: reported as changed without details */ }
+  }
+  const testName = (p, s) => {
+    try { return parseYaml(s === "D" ? git("show", `${base}:${p}`).out : fs.readFileSync(path.join(ROOT, p), "utf8"))?.test ?? null; } catch { return null; }
+  };
+  const tests = files.filter((f) => f.path.startsWith(`${dir}/tests/`) && /\.ya?ml$/.test(f.path) && !f.path.slice(dir.length + 7).includes("/"))
+    .map((f) => ({ ...f, name: testName(f.path, f.status) }));
+  return out({ state: "facts", base, dir, files, workflowChanged: status.has(wfPath), newWorkflow, workflowChanges, tests }, 0);
+}
+
 // ---------- report ----------
 function report(wf, s, st, tests) {
   const ok = (b) => (b ? "PASS" : "FAIL");
@@ -559,13 +607,14 @@ if (cmd === "undo") process.exit(runUndo());
 if (cmd === "status") {   // is a sealed editor still open? Exit 0 = clean, 1 = something is there, 2 = could not tell
   process.exit(spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" }).status ?? 2);
 }
-if (!["scan", "structure", "test", "check", "ui", "tests-fix"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | undo [--json] | status");
+if (!["scan", "structure", "test", "check", "ui", "tests-fix", "submit-facts"].includes(cmd) || !wfDir) {
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix|submit-facts> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | undo [--json] | status");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
 if (cmd === "ui") { openUi(wf); process.exit(0); }
 if (cmd === "tests-fix") process.exit(runTestsFix(wf));
+if (cmd === "submit-facts") process.exit(runSubmitFacts());
 const s =["scan", "check"].includes(cmd) ? scan(wf) : null;
 const st = ["structure", "check"].includes(cmd) ? structure(wf) : null;
 const tests = ["test", "check"].includes(cmd) ? runTests(wf) : null;

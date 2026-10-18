@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = path.join(ROOT, "mcp", "server.mjs");
-const TOOLS = ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "ui_start", "ui_stop", "undo_change", "update_tests"];
+const TOOLS = ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit_preview", "ui_start", "ui_stop", "undo_change", "update_tests"];
 
 // A minimal client: one server process, one JSON message per line each way.
 class Client {
