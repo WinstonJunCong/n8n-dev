@@ -61,7 +61,7 @@ const BAD_NAMES = ["../etc", "..", "a/b", "a\\b", "/abs", "a b", "", "x;rm -rf",
 // ---------- the tools as a set ----------
 test("every tool has a name, a plain description, a strict schema and annotations", () => {
   const { tools } = build();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit", "submit_preview", "ui_discard", "ui_resume", "ui_start", "ui_stop", "undo_change", "update_tests"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "draft_test_preview", "draft_test_remove", "draft_test_save", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit", "submit_preview", "ui_discard", "ui_resume", "ui_start", "ui_stop", "undo_change", "update_tests"]);
   for (const t of tools) {
     assert.ok(t.description.length > 30, t.name);
     assert.equal(t.inputSchema.type, "object", t.name);
@@ -71,11 +71,11 @@ test("every tool has a name, a plain description, a strict schema and annotation
   }
 });
 
-test("only pull_apply, update_tests, ui_discard and undo_change are marked destructive, and the read-only ones are marked read-only", () => {
+test("only pull_apply, update_tests, ui_discard, draft_test_remove and undo_change are marked destructive, and the read-only ones are marked read-only", () => {
   const { tools } = build();
-  assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["pull_apply", "ui_discard", "undo_change", "update_tests"]);
+  assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["draft_test_remove", "pull_apply", "ui_discard", "undo_change", "update_tests"]);
   assert.deepEqual(tools.filter((t) => t.annotations.readOnlyHint).map((t) => t.name).sort(),
-    ["check_workflow", "explain_test_failures", "list_workflows", "pull_preview", "status", "submit_preview"]);
+    ["check_workflow", "draft_test_preview", "explain_test_failures", "list_workflows", "pull_preview", "status", "submit_preview"]);
 });
 
 test("every tool that takes a workflow refuses bad names without running anything", async () => {
@@ -824,4 +824,154 @@ test("ui_discard needs the person's own words, and then says what was and was no
   const leftover = await build({ answers: [say({ state: "discarded", cleaned: false }, 1)] }).byName.ui_discard.handler({ theirWords: "yes" });
   assert.match(leftover.text, /may still be left behind/);
   assert.equal(leftover.isError, true);
+});
+
+// ---------- tests written from the person's own words ----------
+const DRAFT_SPEC = JSON.stringify({
+  name: "Down site sends an alert",
+  when: { trigger: { site: "docs" }, services: { "Check site status": [{ status: "down" }] } },
+  then: [{ step: "Send alert", runs: 1 }, { step: "Compose alert", field: "text", contains: "docs is not healthy" }, { endsAt: "Send alert" }],
+});
+const DRAFT_WORDS = "When a site is down, send an alert that says it is not healthy.";
+const DRAFT_FACTS = { workflow: "workflows/site-health-alert", file: "04-down-site-sends-an-alert.yaml", name: "Down site sends an alert", when: { trigger: { site: "docs" }, services: { "Check site status": [{ status: "down" }] } }, then: JSON.parse(DRAFT_SPEC).then, unmocked: ["Send alert"] };
+const DRAFT_READY = say({ state: "ready", ...DRAFT_FACTS });
+const DRAFT_ADDED = say({ state: "added", ...DRAFT_FACTS });
+const draftPreview = (ctx, over = {}) => ctx.byName.draft_test_preview.handler({ workflow: "site-health-alert", spec: DRAFT_SPEC, theirWords: DRAFT_WORDS, ...over });
+const draftCode = async (ctx) => (await draftPreview(ctx)).text.match(/is (\d{6})/)[1];
+const draftSave = (ctx, code, over = {}) => ctx.byName.draft_test_save.handler({ workflow: "site-health-alert", code, theirWords: "Yes, add it", ...over });
+const applyCalls = (ctx) => ctx.calls.filter((c) => c.args[0] === "test-add" && c.args.includes("--apply"));
+
+test("draft_test_preview shows the test in plain when/then sentences, quotes the person's words, and writes nothing", async () => {
+  const ctx = build({ answers: [DRAFT_READY] });
+  const r = await draftPreview(ctx);
+  assert.equal(r.isError, false);
+  assert.deepEqual(ctx.calls[0].args, ["test-add", "workflows/site-health-alert", "--spec", DRAFT_SPEC, "--words", DRAFT_WORDS]);
+  assert.match(r.text, /You said: “When a site is down, send an alert that says it is not healthy\.”/);
+  assert.match(r.text, /A request comes in with site = “docs”/);
+  assert.match(r.text, /“Check site status” answers with status = “down”/);
+  assert.match(r.text, /“Send alert” runs once/);
+  assert.match(r.text, /The text going into “Compose alert” contains “docs is not healthy”/);
+  assert.match(r.text, /The workflow finishes at “Send alert”/);
+  assert.match(r.text, /“Send alert”.*no pretend answer/s);
+  assert.match(r.text, /will fail until your workflow does this/);
+  assert.match(r.text, /Nothing has been added yet/);
+  assert.match(r.text, /is 1000\d\d/);
+});
+
+test("draft_test_preview says what is wrong in plain words and issues no code, even behind the scenes", async () => {
+  const bad = say({ state: "invalid", errors: [{ code: "unknown-step", step: "Sned alert", steps: ["Send alert", "Compose alert"] }, { code: "name-taken", name: "Existing" }] }, 1);
+  const ctx = build({ answers: [bad, DRAFT_READY] });
+  const r = await draftPreview(ctx);
+  assert.match(r.text, /no step called “Sned alert”.*The steps are: “Send alert”, “Compose alert”/);
+  assert.match(r.text, /already a test called “Existing”/);
+  assert.doesNotMatch(r.text, /is \d{6}/);
+  assert.match(r.text, /For you, the assistant.*draft_test_preview again/s);
+  assert.match((await draftPreview(ctx)).text, /100000\b/, "the refusal did not create a code");
+  const technical = await build({ answers: [say({ state: "invalid", errors: [{ code: "bad-json" }] }, 1)] }).byName.draft_test_preview.handler({ workflow: "site-health-alert", spec: "{", theirWords: DRAFT_WORDS });
+  assert.match(technical.text, /adjust how I've described that test/);
+});
+
+test("draft_test_preview needs the person's own words and refuses odd arguments before running anything", async () => {
+  for (const theirWords of ["", "   ", "x".repeat(501)]) {
+    const ctx = build({ answers: [DRAFT_READY] });
+    assert.match((await draftPreview(ctx, { theirWords })).text, /your own words/);
+    assert.equal(ctx.calls.length, 0);
+  }
+  const ctx = build();
+  for (const args of [{ workflow: "site-health-alert", spec: "{}" }, { workflow: "site-health-alert", spec: 5, theirWords: "x" }, { workflow: "site-health-alert", spec: "{}", theirWords: "x", file: "../x" }]) {
+    assert.equal((await ctx.byName.draft_test_preview.handler(args)).isError, true, JSON.stringify(args));
+  }
+  assert.equal(ctx.calls.length, 0);
+});
+
+test("draft_test_save adds exactly the test that was previewed, once the person has had time to read it", async () => {
+  const ctx = build({ answers: [DRAFT_READY, DRAFT_ADDED] });
+  ctx.state.checks["site-health-alert"] = { passed: true, hash: "old" };
+  const code = await draftCode(ctx);
+  ctx.clock.t += MIN_CONFIRM_MS;
+  const r = await draftSave(ctx, code);
+  assert.equal(r.isError, false);
+  assert.match(r.text, /Added the test “Down site sends an alert”/);
+  assert.match(r.text, /fail until your workflow does this, which is expected/);
+  const [apply] = applyCalls(ctx);
+  assert.deepEqual(apply.args, ["test-add", "workflows/site-health-alert", "--spec", DRAFT_SPEC, "--words", DRAFT_WORDS, "--apply"]);
+  assert.equal(ctx.state.checks["site-health-alert"], undefined, "tests changed, so an earlier check no longer counts");
+});
+
+test("draft_test_save cannot be given a different test than the one previewed", async () => {
+  const ctx = build({ answers: [DRAFT_READY] });
+  const code = await draftCode(ctx);
+  ctx.clock.t += MIN_CONFIRM_MS;
+  for (const extra of [{ spec: "{}" }, { theirWordsForTest: "other" }, { file: "x.yaml" }]) assert.equal((await draftSave(ctx, code, extra)).isError, true);
+  assert.equal(applyCalls(ctx).length, 0);
+});
+
+test("draft_test_save is refused, and adds nothing, without time, words, a valid code, or when things changed", async () => {
+  const quick = build({ answers: [DRAFT_READY] });
+  const code = await draftCode(quick);
+  quick.clock.t += MIN_CONFIRM_MS - 1;
+  assert.match((await draftSave(quick, code)).text, /go-ahead first/);
+  quick.clock.t += 1;
+  for (const theirWords of ["", "   ", "x".repeat(201)]) assert.match((await draftSave(quick, code, { theirWords })).text, /need to hear from you/);
+  assert.equal((await draftSave(quick, "000000")).isError, true, "a code that was never issued");
+  assert.equal((await draftSave(quick, code, { workflow: "store-pickup-reminder" })).isError, true, "a code for another workflow");
+  assert.equal(applyCalls(quick).length, 0);
+
+  const moved = build({ answers: [DRAFT_READY] });
+  const code2 = await draftCode(moved);
+  moved.clock.t += MIN_CONFIRM_MS;
+  moved.fsx.files["workflows/site-health-alert/workflow.json"] = '{"v":"edited after the preview"}';
+  assert.equal((await draftSave(moved, code2)).isError, true, "the workflow changed after the preview");
+  assert.equal(applyCalls(moved).length, 0);
+});
+
+test("a code works once, and a newer preview replaces an older one", async () => {
+  const ctx = build({ answers: [DRAFT_READY, DRAFT_ADDED, DRAFT_READY, DRAFT_READY] });
+  const first = await draftCode(ctx);
+  ctx.clock.t += MIN_CONFIRM_MS;
+  assert.equal((await draftSave(ctx, first)).isError, false);
+  assert.equal((await draftSave(ctx, first)).isError, true, "replayed");
+  const older = await draftCode(ctx);
+  const otherSpec = JSON.stringify({ ...JSON.parse(DRAFT_SPEC), name: "A different test" });         // a different test, so a different code
+  const newer = (await draftPreview(ctx, { spec: otherSpec })).text.match(/is (\d{6})/)[1];
+  assert.notEqual(older, newer);
+  ctx.clock.t += MIN_CONFIRM_MS;
+  assert.equal((await draftSave(ctx, older)).isError, true, "the older preview no longer counts once a newer one was shown");
+  assert.equal(applyCalls(ctx).length, 1, "only the first save ran");
+});
+
+test("draft_test_save reports a test that no longer fits as a plain refusal", async () => {
+  const taken = say({ state: "invalid", errors: [{ code: "name-taken", name: "Down site sends an alert" }] }, 1);
+  const ctx = build({ answers: [DRAFT_READY, taken] });
+  const code = await draftCode(ctx);
+  ctx.clock.t += MIN_CONFIRM_MS;
+  assert.match((await draftSave(ctx, code)).text, /already a test called “Down site sends an alert”/);
+});
+
+test("draft_test_remove needs the person's words, takes back only what was added, and says why when it cannot", async () => {
+  for (const args of [{ workflow: "site-health-alert", file: "04-x.yaml" }, { workflow: "site-health-alert", file: "04-x.yaml", theirWords: "  " }]) {
+    const ctx = build({ answers: [say({ state: "removed", file: "04-x.yaml" })] });
+    assert.equal((await ctx.byName.draft_test_remove.handler(args)).isError, true);
+    assert.equal(ctx.calls.length, 0);
+  }
+  for (const [state, expected, isError] of [
+    ["removed", /Removed the test “Down site sends an alert”/, false], ["already-gone", /already gone/, false],
+    ["not-drafted", /only take back tests that I added/, true], ["changed-since", /edited that test since I wrote it/, true], ["bad-file", /doesn't look like the name of a test/, true],
+  ]) {
+    const ctx = build({ answers: [say({ state, file: "04-x.yaml", name: "Down site sends an alert" }, state === "removed" ? 0 : 1)] });
+    const r = await ctx.byName.draft_test_remove.handler({ workflow: "site-health-alert", file: "04-x.yaml", theirWords: "Yes, take it back" });
+    assert.match(r.text, expected, state);
+    assert.equal(r.isError, isError, state);
+    assert.deepEqual(ctx.calls[0].args, ["test-remove", "workflows/site-health-alert", "--file", "04-x.yaml"]);
+  }
+});
+
+test("the three draft tools refuse bad workflow names without running anything", async () => {
+  const ctx = build();
+  for (const workflow of BAD_NAMES) {
+    assert.equal((await ctx.byName.draft_test_preview.handler({ workflow, spec: DRAFT_SPEC, theirWords: DRAFT_WORDS })).isError, true, workflow);
+    assert.equal((await ctx.byName.draft_test_save.handler({ workflow, code: "123456", theirWords: "yes" })).isError, true, workflow);
+    assert.equal((await ctx.byName.draft_test_remove.handler({ workflow, file: "01-x.yaml", theirWords: "yes" })).isError, true, workflow);
+  }
+  assert.equal(ctx.calls.length, 0);
 });

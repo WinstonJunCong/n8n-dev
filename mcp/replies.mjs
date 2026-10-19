@@ -296,6 +296,91 @@ export function replyForTestUpdate(j) {
   return replyForTestFix(j);
 }
 
+// ---------- tests written from the person's own words ----------
+const wordsOf = (s) => String(s).replace(/[._]+/g, " ");
+const valueText = (v) => {
+  if (typeof v === "string") return q(v);
+  if (v !== null && typeof v === "object") { const t = JSON.stringify(v); return t.length > 60 ? `${t.slice(0, 57)}…` : t; }
+  return String(v);
+};
+const pairsText = (obj) => Object.entries(obj ?? {}).map(([k, v]) => `${wordsOf(k)} = ${valueText(v)}`).join(", ");
+
+// The "when / then" of a test, as plain sentences.
+export function describeWhenThen(j) {
+  const when = [];
+  const trigger = pairsText(j.when?.trigger);
+  when.push(trigger ? `A request comes in with ${trigger}` : "A request comes in");
+  for (const [step, rows] of Object.entries(j.when?.services ?? {})) when.push(`${q(step)} answers with ${rows.map(pairsText).join(", and then with ")}`);
+  const then = (j.then ?? []).map((t) => {
+    if ("endsAt" in t) return `The workflow finishes at ${q(t.endsAt)}`;
+    if ("runs" in t) return t.runs === 1 ? `${q(t.step)} runs once` : `${q(t.step)} runs ${t.runs} times`;
+    if ("doesNotRun" in t) return `${q(t.step)} does not run`;
+    const op = "is" in t ? "is" : "isNot" in t ? "is not" : "contains";
+    const value = t.is ?? t.isNot ?? t.contains;
+    return `The ${wordsOf(t.field)} going ${t.side === "output" ? "out of" : "into"} ${q(t.step)} ${op} ${valueText(value)}`;
+  });
+  return { when, then };
+}
+
+const DRAFT_ERRORS = {
+  "bad-name": () => "The test needs a short name that describes it.",
+  "name-taken": (e) => `There is already a test called ${q(e.name)}. Give this one a different name.`,
+  "unknown-step": (e) => `There is no step called ${q(e.step)} in this workflow.${e.steps?.length ? ` The steps are: ${e.steps.map(q).join(", ")}.` : ""}`,
+  "not-outside": (e) => `${q(e.step)} isn't a step that talks to an outside service, so it can't be given a pretend answer.${e.outside?.length ? ` The ones that can are: ${e.outside.map(q).join(", ")}.` : ""}`,
+  "empty-then": () => "The test needs at least one thing that should happen.",
+  "too-many-checks": (e) => `That is more than ${e.max} things for one test. Split it into smaller tests.`,
+  "duplicate-check": () => "The same thing is checked twice.",
+  "step-name-unsupported": (e) => `The step ${q(e.step)} has a name that tests can't refer to.`,
+  "too-many-tests": (e) => `This workflow already has ${e.max} tests, which is the most I'll add.`,
+  "no-words": () => "I need your own words describing what should happen, so the test can show where it came from.",
+};
+const DRAFT_FORMAT = 'spec is JSON: {"name":"…","when":{"trigger":{…},"services":{"<outside step>":[{…}]}},"then":[{"step":"S","runs":1} | {"step":"S","doesNotRun":true} | {"step":"S","side":"input|output","field":"a.b","is|contains|isNot":"v"} | {"endsAt":"S"}]}';
+
+export function replyForDraftPreview(j, code, words) {
+  if (j.state === "invalid") {
+    const own = (j.errors ?? []).filter((e) => DRAFT_ERRORS[e.code]).map((e) => DRAFT_ERRORS[e.code](e));
+    const plain = own.length ? `I can't add that test yet:\n${bullets(own)}` : "I need to adjust how I've described that test before I can show it to you. Nothing has been added.";
+    return reply(plain, `fix the description and call draft_test_preview again; problems: ${JSON.stringify(j.errors)}. ${DRAFT_FORMAT}`, false);
+  }
+  if (j.state !== "ready") return reply("I couldn't prepare that test. Nothing has been added.", undefined, true);
+  const wt = describeWhenThen(j);
+  const parts = [
+    "Here is the test I would add, from what you told me.",
+    `You said: ${q(words)}`,
+    `When:\n${bullets(wt.when)}`,
+    `Then:\n${bullets(wt.then)}`,
+  ];
+  if (j.unmocked?.length) parts.push(`These steps talk to outside services but have no pretend answer here: ${j.unmocked.map(q).join(", ")}. If the test reaches one of them it will stop with an error, so tell me if one of them should answer something.`);
+  parts.push("This test will fail until your workflow does this. That's expected: it is the thing you are about to build.");
+  parts.push("Nothing has been added yet. If that is what you want, say so and I'll add it.");
+  return reply(parts.join("\n\n"), `the one-time code is ${code}. Show the person the above and STOP: wait for them to say yes in their own words. Only then call draft_test_save with this code and their words as theirWords. If they want a change, call draft_test_preview again`);
+}
+
+export function replyForDraftRefused(why) {
+  if (why === "too-soon") return reply("I need your go-ahead first. Have a look at the test, and tell me if you'd like me to add it.", "do not call draft_test_save yet: the person has not had time to read the preview. Show it and wait for their reply", true);
+  return reply("I haven't added anything, because I need to hear from you that you want it. Tell me and I'll add it.", "ask the person; call it only with their own words as theirWords", true);
+}
+
+export function replyForDraftSaved(j) {
+  if (j.state === "added") {
+    return reply(`Added the test ${q(j.name)}. It will fail until your workflow does this, which is expected.\n\nThe next step is to open the test editor and make the change.`,
+      `offer to open the editor with ui_start; the new test is loaded with the others. If they change their mind, draft_test_remove takes it back (file ${j.file})`);
+  }
+  if (j.state === "invalid") return replyForDraftPreview(j);
+  return reply("I couldn't add the test. Nothing was changed.", undefined, true);
+}
+
+export function replyForDraftRemoved(j) {
+  const plain = {
+    removed: `Removed the test ${j.name ? q(j.name) : "you asked about"}. Nothing else was touched.`,
+    "already-gone": "That test was already gone.",
+    "not-drafted": "I can only take back tests that I added for you in this way, so I've left that one alone.",
+    "changed-since": "Someone has edited that test since I wrote it, so I've left it alone to keep their changes.",
+    "bad-file": "That doesn't look like the name of a test.",
+  }[j.state] ?? "I couldn't remove it. Nothing was changed.";
+  return reply(plain, undefined, !["removed", "already-gone"].includes(j.state));
+}
+
 // ---------- sending a change for review ----------
 const SUBMIT_BLOCKS = {
   "editor-open": () => "The test editor is still open. Tell me when you've finished with it and I'll close it first.",
