@@ -3,7 +3,7 @@
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
 import { decideSubmit, branchName, commitMessage, compareUrl } from "./submit.mjs";
-import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForStatus } from "./replies.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForStatus, replyForSession, replyForStartRefused, replyForResume, replyForDiscard } from "./replies.mjs";
 
 const MINUTE = 60_000;
 export const MIN_OPEN_MS = 30_000;       // an editor the person has only just been given cannot be closed yet
@@ -115,13 +115,16 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
     {
       name: "status",
       title: "Check for an open editor",
-      description: "Report whether a sealed editor from an earlier run is still open.",
+      description: "Report whether a test editor, or changes saved from one, are left over from earlier, how old they are, and what the person can do about it. It changes nothing. If something is there, tell the person in plain words and let them choose: carry on (ui_resume), save and close (ui_stop), or throw it away (ui_discard).",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true, openWorldHint: false },
       async handler(args) {
         const a = strictArgs(args, {});
         if (a.error) return result(a.error, true);
-        const r = await run(["status"], { okStatuses: [0, 1] });
+        const s = await run(["session", "--json"], { okStatuses: [0] });
+        const j = lastJson(s);
+        if (j && j.kind) return plain(replyForSession(j));
+        const r = await run(["status"], { okStatuses: [0, 1] });                // the session report was unreadable: fall back to the plain yes/no
         return plain(replyForStatus(r.ok ? r.status : 2, r.out));
       },
     },
@@ -143,7 +146,41 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
         const r = await run(cli, { timeoutMs: 5 * MINUTE, okStatuses: [0, 1, 2] });
         const j = lastJson(r) ?? { state: "failed", details: r.out };
         if (j.state === "started") { state.chamber = a.value.workflow; state.openedAt = now(); }
+        if (j.state === "already-running" || j.state === "pending-edits") { const offer = replyForStartRefused(j); if (offer) return plain(offer); }
         return plain(replyForStart(j));
+      },
+    },
+    {
+      name: "ui_resume",
+      title: "Bring back an earlier editor",
+      description: "Bring back a test editor that was stopped (a restart, a crash) or is still running from earlier, with the person's changes still in it. Only when the person chose to carry on. It never creates or deletes anything. It refuses if the workflow changed since that editor was opened. Give the person the address and sign-in, then STOP and wait for them to write back.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, {});
+        if (a.error) return result(a.error, true);
+        const r = await run(["ui-resume", "--json"], { timeoutMs: 5 * MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r) ?? { state: "failed", details: r.out };
+        if (j.state === "resumed") { state.chamber = j.workflow ? j.workflow.split("/").pop() : "editor"; state.openedAt = now(); }
+        return plain(replyForResume(j));
+      },
+    },
+    {
+      name: "ui_discard",
+      title: "Throw away an earlier editor",
+      description: "Throw away a test editor left over from earlier, whatever is in it, and any changes saved from it that were never applied. It never touches the workflow, its tests, or what undo needs. ONLY call this when the person has told you, in their own words, that they want it thrown away (put their words in theirWords). It cannot be undone.",
+      inputSchema: { type: "object", properties: { theirWords: { type: "string", description: "The person's own words saying to throw it away, copied exactly" } }, required: ["theirWords"], additionalProperties: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, { theirWords: { type: "string", required: true } });
+        if (a.error) return result(a.error, true);
+        const words = a.value.theirWords.trim();
+        if (!words || words.length > MAX_WORDS) return plain(replyForDiscard({ state: "no-words" }));
+        const r = await run(["ui-discard", "--json"], { timeoutMs: 3 * MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        if (j.state === "discarded") { state.chamber = null; state.openedAt = null; }
+        return plain(replyForDiscard(j));
       },
     },
     {

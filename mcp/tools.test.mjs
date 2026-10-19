@@ -61,7 +61,7 @@ const BAD_NAMES = ["../etc", "..", "a/b", "a\\b", "/abs", "a b", "", "x;rm -rf",
 // ---------- the tools as a set ----------
 test("every tool has a name, a plain description, a strict schema and annotations", () => {
   const { tools } = build();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit", "submit_preview", "ui_start", "ui_stop", "undo_change", "update_tests"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit", "submit_preview", "ui_discard", "ui_resume", "ui_start", "ui_stop", "undo_change", "update_tests"]);
   for (const t of tools) {
     assert.ok(t.description.length > 30, t.name);
     assert.equal(t.inputSchema.type, "object", t.name);
@@ -71,9 +71,9 @@ test("every tool has a name, a plain description, a strict schema and annotation
   }
 });
 
-test("only pull_apply, update_tests and undo_change are marked destructive, and the read-only ones are marked read-only", () => {
+test("only pull_apply, update_tests, ui_discard and undo_change are marked destructive, and the read-only ones are marked read-only", () => {
   const { tools } = build();
-  assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["pull_apply", "undo_change", "update_tests"]);
+  assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["pull_apply", "ui_discard", "undo_change", "update_tests"]);
   assert.deepEqual(tools.filter((t) => t.annotations.readOnlyHint).map((t) => t.name).sort(),
     ["check_workflow", "explain_test_failures", "list_workflows", "pull_preview", "status", "submit_preview"]);
 });
@@ -167,16 +167,52 @@ test("very long output is shortened", async () => {
 });
 
 // ---------- status ----------
-test("status reports clean and leftovers as results, and 'could not tell' as an error", async () => {
-  const a = build({ answers: [{ status: 0, out: "CLEAN: nothing" }] });
-  assert.deepEqual(await a.byName.status.handler({}), { text: "No test editor is open.", isError: false });
-  assert.deepEqual(a.calls[0].args, ["status"]);
-  const b = build({ answers: [{ status: 1, out: "LEFTOVERS:" }] });
-  const left = await b.byName.status.handler({});
-  assert.equal(left.isError, false);
+const SESSION = (over) => say({ kind: "none", workflow: null, drift: null, changes: null, ageMs: null, age: null, stale: false, ...over });
+
+test("status asks for the session report and says what, if anything, is left over from earlier", async () => {
+  const none = build({ answers: [SESSION()] });
+  assert.deepEqual(await none.byName.status.handler({}), { text: "No test editor is open, and nothing is waiting from earlier.", isError: false });
+  assert.deepEqual(none.calls[0].args, ["session", "--json"]);
+  const unknown = await build({ answers: [SESSION({ kind: "unknown" })] }).byName.status.handler({});
+  assert.equal(unknown.isError, true);
+  assert.match(unknown.text, /Docker Desktop/);
+});
+
+test("status falls back to the plain yes/no when the session report cannot be read", async () => {
+  const garbled = { status: 1, stdout: "not json", out: "not json" };
+  const clean = build({ answers: [garbled, { status: 0, out: "CLEAN: nothing" }] });
+  assert.equal((await clean.byName.status.handler({})).text, "No test editor is open.");
+  assert.deepEqual(clean.calls.map((c) => c.args[0]), ["session", "status"]);
+  const left = await build({ answers: [garbled, { status: 1, out: "LEFTOVERS:" }] }).byName.status.handler({});
   assert.match(left.text, /still open/);
-  const c = build({ answers: [{ status: 2, out: "UNKNOWN: Docker is not running" }] });
-  assert.equal((await c.byName.status.handler({})).isError, true);
+  assert.equal((await build({ answers: [garbled, { status: 2, out: "UNKNOWN: Docker is not running" }] }).byName.status.handler({})).isError, true);
+});
+
+const stoppedSession = (over) => ({ kind: "editor-stopped", workflow: "workflows/site-health-alert", drift: false, changes: 2, ageMs: 5 * 3600_000, age: "about 5 hours ago", stale: false, ...over });
+
+test("status offers the choices for each thing an earlier session can leave, with its age", async () => {
+  const stopped = (await build({ answers: [SESSION(stoppedSession())] }).byName.status.handler({})).text;
+  assert.match(stopped, /A test editor from about 5 hours ago was stopped \(probably by a restart\), but your changes are still safe in it/);
+  assert.match(stopped, /bring it back so you can carry on, close it and keep your changes, or throw it away/);
+  assert.match(stopped, /For you, the assistant.*ui_resume.*ui_stop.*ui_discard/s);
+  const running = (await build({ answers: [SESSION(stoppedSession({ kind: "editor-running" }))] }).byName.status.handler({})).text;
+  assert.match(running, /is still open, with your changes in it/);
+  const saved = (await build({ answers: [SESSION(stoppedSession({ kind: "saved-edits", changes: 1 }))] }).byName.status.handler({})).text;
+  assert.match(saved, /1 change from about 5 hours ago that were saved when the editor closed but never applied/);
+  assert.match(saved, /show you what they are, or throw them away/);
+  assert.match(saved, /pull_preview/);
+});
+
+test("old leftovers are described as old, and a workflow that moved on removes the offer to carry on", async () => {
+  const old = (await build({ answers: [SESSION(stoppedSession({ stale: true, age: "5 days ago" }))] }).byName.status.handler({})).text;
+  assert.match(old, /may be out of date\. Throwing it away is usually the safe choice/);
+  const drift = (await build({ answers: [SESSION(stoppedSession({ drift: true }))] }).byName.status.handler({})).text;
+  assert.match(drift, /workflow has changed since then/);
+  assert.doesNotMatch(drift, /bring it back so you can carry on/);
+  assert.doesNotMatch(drift, /ui_resume/);
+  const driftSaved = (await build({ answers: [SESSION(stoppedSession({ kind: "saved-edits", drift: true }))] }).byName.status.handler({})).text;
+  assert.match(driftSaved, /I can throw them away\./);
+  assert.doesNotMatch(driftSaved, /show you what they are/);
 });
 
 // ---------- ui_start / ui_stop ----------
@@ -722,4 +758,70 @@ test("a preview says when it could not refresh from the team's repository", asyn
   const ctx = checked([CLEAN, SUBMIT_FACTS({ fetched: false })]);
   assert.match((await preview(ctx)).text, /couldn't reach the team's repository/);
   assert.doesNotMatch((await preview(checked([CLEAN, SUBMIT_FACTS({ fetched: true })]))).text, /couldn't reach/);
+});
+
+// ---------- an editor left over from earlier: refusing to start, bringing it back, throwing it away ----------
+const LEFT = { kind: "editor-stopped", workflow: "workflows/site-health-alert", drift: false, changes: 2, ageMs: 5 * 3600_000, age: "about 5 hours ago", stale: false };
+
+test("ui_start does not open a new editor over one that is still there: it says what is there and offers the choices", async () => {
+  for (const [state, session, expected] of [
+    ["already-running", { ...LEFT, kind: "editor-running" }, /is still open, with your changes in it/],
+    ["already-running", LEFT, /was stopped \(probably by a restart\)/],
+    ["pending-edits", { ...LEFT, kind: "saved-edits", changes: 3 }, /3 changes from about 5 hours ago that were saved when the editor closed but never applied/],
+  ]) {
+    const ctx = build({ answers: [say({ state, message: "x", session }, 1)] });
+    const r = await ctx.byName.ui_start.handler({ workflow: "site-health-alert" });
+    assert.equal(r.isError, true, state);
+    assert.match(r.text, /haven't opened a new editor/);
+    assert.match(r.text, expected);
+    assert.equal(ctx.state.chamber, null, "nothing is recorded as opened");
+  }
+});
+
+test("ui_resume brings the earlier editor back with its address and login, and records it as open", async () => {
+  const resumed = say({ state: "resumed", address: "http://127.0.0.1:5678", login: { email: "test@test.com", password: "Test1234" }, workflow: "workflows/site-health-alert", session: LEFT });
+  const ctx = build({ answers: [resumed] });
+  const r = await ctx.byName.ui_resume.handler({});
+  assert.equal(r.isError, false);
+  assert.deepEqual(ctx.calls[0].args, ["ui-resume", "--json"]);
+  assert.match(r.text, /Your earlier test editor is back, with your changes in it/);
+  assert.match(r.text, /http:\/\/127\.0\.0\.1:5678/);
+  assert.equal(ctx.state.chamber, "site-health-alert");
+  // closing it straight away is refused, the same as for a fresh editor
+  ctx.clock.t += 3_000;
+  assert.match((await ctx.byName.ui_stop.handler({ theirWords: "I am done" })).text, /only just opened/);
+});
+
+test("ui_resume says why it did not bring anything back", async () => {
+  for (const [answer, expected] of [
+    [say({ state: "nothing-to-resume", session: { kind: "none" } }, 1), /no earlier test editor to bring back/],
+    [say({ state: "drifted", session: { ...LEFT, drift: true } }, 1), /workflow has changed since then/],
+    [say({ state: "failed", details: "docker: boom" }, 1), /Docker Desktop/],
+  ]) {
+    const ctx = build({ answers: [answer] });
+    const r = await ctx.byName.ui_resume.handler({});
+    assert.equal(r.isError, true);
+    assert.match(r.text, expected);
+    assert.equal(ctx.state.chamber, null);
+  }
+  assert.equal((await build().byName.ui_resume.handler({ anything: 1 })).isError, true);
+  assert.equal((await build({ answers: [{ status: 1, stdout: "junk", out: "junk" }] }).byName.ui_resume.handler({})).isError, true);
+});
+
+test("ui_discard needs the person's own words, and then says what was and was not thrown away", async () => {
+  for (const args of [{}, { theirWords: "" }, { theirWords: "   " }, { theirWords: "x".repeat(201) }, { theirWords: "yes", extra: 1 }]) {
+    const ctx = build({ answers: [say({ state: "discarded", cleaned: true })] });
+    assert.equal((await ctx.byName.ui_discard.handler(args)).isError, true, JSON.stringify(args).slice(0, 40));
+    assert.equal(ctx.calls.length, 0, "nothing ran");
+  }
+  const ctx = build({ answers: [say({ state: "discarded", cleaned: true })] });
+  ctx.state.chamber = "site-health-alert";
+  const r = await ctx.byName.ui_discard.handler({ theirWords: "Yes, throw it away" });
+  assert.equal(r.isError, false);
+  assert.deepEqual(ctx.calls[0].args, ["ui-discard", "--json"]);
+  assert.match(r.text, /thrown away\. Your workflow and your tests haven't been touched/);
+  assert.equal(ctx.state.chamber, null);
+  const leftover = await build({ answers: [say({ state: "discarded", cleaned: false }, 1)] }).byName.ui_discard.handler({ theirWords: "yes" });
+  assert.match(leftover.text, /may still be left behind/);
+  assert.equal(leftover.isError, true);
 });

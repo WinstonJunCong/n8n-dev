@@ -88,6 +88,75 @@ export function replyForStart(j) {
   return reply(plain + technical(j.state === "failed" || j.state === "build-failed" ? (j.details || j.message) : ""), hint, true);
 }
 
+// ---------- what an earlier editor left behind ----------
+const ageOf = (s) => (typeof s.age === "string" && s.age ? s.age : "earlier");       // the command line says it in words (see agePhrase in session.mjs)
+const DRIFT_NOTE = "The workflow has changed since then, so those edits may no longer fit it.";
+
+// The offer: what was found, how old it is, and the choices. Never acts.
+export function describeOffer(s) {
+  const age = ageOf(s);
+  const n = s.changes ?? 0;
+  const head = {
+    "editor-running": `A test editor from ${age} is still open, with your changes in it.`,
+    "editor-stopped": `A test editor from ${age} was stopped (probably by a restart), but your changes are still safe in it.`,
+    "editor-orphan": "Something from an earlier test editor is still here.",
+    "saved-edits": `You have ${n} change${n === 1 ? "" : "s"} from ${age} that were saved when the editor closed but never applied to your workflow.`,
+  }[s.kind];
+  if (!head) return null;
+  const notes = [];
+  if (s.stale) notes.push(`That's from ${age}, so it may be out of date. Throwing it away is usually the safe choice.`);
+  if (s.drift) notes.push(DRIFT_NOTE);
+  const editor = s.kind === "editor-running" || s.kind === "editor-stopped";
+  const choices = s.kind === "saved-edits" ? (s.drift ? "I can throw them away." : "I can show you what they are, or throw them away.")
+    : editor ? (s.drift ? "I can close it and keep the changes for a look, or throw it away." : "I can bring it back so you can carry on, close it and keep your changes, or throw it away.")
+    : "I can close it, or throw it away.";
+  const hint = s.kind === "saved-edits"
+    ? `offer: pull_preview for ${s.workflow ?? "the workflow"} to show what changed${s.drift ? " (it will refuse, the workflow moved)" : ""}; ui_discard to throw them away (needs their own words). Ask which, then wait`
+    : `offer: ${s.drift ? "" : "ui_resume to carry on; "}ui_stop to save the changes and close it; ui_discard to throw it away (needs their own words). Ask which, then wait`;
+  return { text: [head, ...notes, choices].join(" "), hint };
+}
+
+export function replyForSession(s) {
+  const offer = s && describeOffer(s);
+  if (offer) return reply(offer.text, offer.hint);
+  if (s?.kind === "unknown") return reply("I can't tell right now whether a test editor is open. Is Docker Desktop running?", undefined, true);
+  return reply("No test editor is open, and nothing is waiting from earlier.");
+}
+
+// A start that was refused because something from before is still there: say what, and offer the choices.
+export function replyForStartRefused(j) {
+  const offer = j.session && describeOffer(j.session);
+  if (!offer) return null;
+  return reply(`I haven't opened a new editor, because there is already something from before. ${offer.text}`, offer.hint, true);
+}
+
+export function replyForResume(j) {
+  if (j.state === "resumed") {
+    const login = j.login ? ` Sign in with the email ${j.login.email} and the password ${j.login.password}.` : "";
+    return reply(`Your earlier test editor is back, with your changes in it. Open this address in your browser: ${j.address}.${login}\n\nTake your time. When you have finished, tell me “I'm done” and I'll close it and keep your changes.`,
+      "give the person the address and sign-in, then STOP and wait. Call ui_stop only when they say they are finished, with their words as theirWords");
+  }
+  if (j.state === "drifted") {
+    const offer = j.session && describeOffer(j.session);
+    return reply(`I haven't brought it back. ${DRIFT_NOTE}${offer ? ` I can close it and keep the changes for a look, or throw it away.` : ""}`, "offer ui_stop (save and close) or ui_discard (throw away, needs their words)", true);
+  }
+  const plain = {
+    "nothing-to-resume": "There is no earlier test editor to bring back.",
+    failed: "I couldn't bring the editor back. Make sure Docker Desktop is open and running, then ask me to try again.",
+  }[j.state] ?? "I couldn't bring the editor back.";
+  return reply(plain + technical(j.state === "failed" ? j.details : ""), undefined, true);
+}
+
+export function replyForDiscard(j) {
+  if (j.state === "no-words") return reply("I haven't thrown anything away, because I need you to tell me that's what you want. Say the word and I'll do it.", "ask the person; call ui_discard only with their own words as theirWords", true);
+  if (j.state === "discarded") {
+    return reply(j.cleaned
+      ? "Done. The earlier test editor, and any changes saved from it, are thrown away. Your workflow and your tests haven't been touched."
+      : "I threw it away, but something from it may still be left behind. Your workflow and your tests haven't been touched.", undefined, !j.cleaned);
+  }
+  return reply("I couldn't throw it away. Nothing was changed.", undefined, true);
+}
+
 export function replyForStop(j) {
   if (j.state === "no-session") return reply("There is no test editor session to close.", undefined, false);
   if (j.state === "nothing-running") return reply("No test editor was open, so there was nothing to save.", undefined, false);

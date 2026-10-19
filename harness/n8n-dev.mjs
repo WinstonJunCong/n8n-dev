@@ -11,6 +11,9 @@
 //   n8n-dev submit <workflow-dir> --branch n8n-dev/<name> --message <text>   send the workflow folder to a NEW branch of the team repository (never the shared branch)
 //   n8n-dev submit-facts <workflow-dir> [--fetch]                          what differs from the shared branch (read-only, JSON), for the submit checks
 //   n8n-dev undo                                                put back workflow.json as it was before the last pull --apply (only if untouched since)
+//   n8n-dev session [--json]                                    what an earlier editor left behind (running, stopped, or saved edits never applied) and how old it is
+//   n8n-dev ui-resume [--json]                                  bring back an editor that was stopped by a restart or crash, with its contents
+//   n8n-dev ui-discard [--json]                                 throw away an earlier editor and the edits saved from it that were never applied
 //   n8n-dev status                                              is a sealed editor still open? (0 clean, 1 something is there, 2 unknown)
 //   --json (on check, pull, undo, ui --detach, ui-stop)               print the facts as one JSON object, for programs such as the MCP server
 //   n8n-dev pull      [<workflow-dir>] [--apply] [--force]      bring edits saved in that editor back into workflow.json (dry run unless --apply)
@@ -24,7 +27,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, parseDocument } from "yaml";
 import { buildPlan, describeOps, planToJson, decidePull } from "./pull.mjs";
-import { startVerdict, savedSince } from "./session.mjs";
+import { startVerdict, savedSince, describeSession, startRefusal, agePhrase } from "./session.mjs";
 import { findBash } from "./shell.mjs";
 import { makeRecord, addTestEdits, decideUndo, safeRelative } from "./backup.mjs";
 import { planTestUpdates, rewriteTestText } from "./testfix.mjs";
@@ -255,8 +258,8 @@ function decorateForUi(v, wf) {
 function openUi(wf) {
   // `--detach --json` prints ONE JSON object describing what happened, and nothing else, for programs (the MCP server).
   const asJson = args.includes("--detach") && args.includes("--json");
-  const bail = (code, state, message) => {
-    if (asJson) console.log(JSON.stringify({ state, message }));
+  const bail = (code, state, message, extra = {}) => {
+    if (asJson) console.log(JSON.stringify({ state, message, ...extra }));
     else console.error(message);
     process.exit(code);
   };
@@ -272,7 +275,10 @@ function openUi(wf) {
   // silently. (Exit 1 = something is there; 2 = could not tell, which the start itself will report.)
   const running = spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, encoding: "utf8" });
   const verdict = startVerdict(running.status);
-  if (verdict.refuse) bail(1, "already-running", verdict.message);
+  // Also refuse when the last editor was closed and its edits were saved but never applied: a new editor would wipe them.
+  const session = sessionInfo();
+  const refusal = startRefusal({ verdict, session });
+  if (refusal) bail(1, refusal.state, refusal.message, { session });
   const varDir = freshDir("ui-variants");
   const exportDir = freshDir("ui-export");
   const slug = path.basename(wfDir).replace(/[^a-z0-9]/gi, "").slice(0, 8);
@@ -323,6 +329,63 @@ function openUi(wf) {
   // Confirm nothing is left running. Exit code: 0 = clean, 1 = leftovers, 2 = could not check.
   const left = spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" });
   process.exit(left.status ?? 2);
+}
+
+// ---------- session: what an earlier editor left behind ----------
+const chamberCmd = (sub) => spawnSync(`bash ./scripts/n8n-chamber.sh ${sub}`, { shell: SHELL, cwd: ROOT, encoding: "utf8", env: { ...process.env, MSYS_NO_PATHCONV: "1" } });
+
+function sessionInfo() {
+  // N8N_DEV_TEST_EDITOR_STATE lets the tests say what Docker would say, so they never depend on (or touch) a real editor.
+  const editor = process.env.N8N_DEV_TEST_EDITOR_STATE || (chamberCmd("state").stdout || "").trim() || "unknown";
+  let manifest = null;
+  try { manifest = JSON.parse(fs.readFileSync(path.join(WORK, "ui-manifest.json"), "utf8")); } catch { /* no session recorded */ }
+  let savedAt = null, appliedAt = null, drift = null, changes = null;
+  if (manifest) {
+    if (safeRelative(manifest.exportDir ?? "")) {
+      const dir = path.resolve(ROOT, manifest.exportDir);
+      const times = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => fs.statSync(path.join(dir, f)).mtimeMs) : [];
+      savedAt = times.length ? Math.max(...times) : null;
+    }
+    try { appliedAt = Date.parse(JSON.parse(fs.readFileSync(UNDO_FILE, "utf8")).at) || null; } catch { /* nothing applied */ }
+    try { const plan = loadPlan(); if (!plan.error) { drift = plan.drift; changes = plan.ops.length; } } catch { /* unreadable: no details */ }
+  }
+  const info = describeSession({ editor, manifest, savedAt, appliedAt, drift, changes, now: Date.now() });
+  return { ...info, age: info.ageMs === null ? null : agePhrase(info.ageMs) };
+}
+
+function runSession() {
+  const info = sessionInfo();
+  console.log(args.includes("--json") ? JSON.stringify(info) : `${info.kind}${info.workflow ? ` (${info.workflow})` : ""}`);
+  return 0;
+}
+
+// Throws away the editor, whatever is in it, and the edits saved from it that were never applied. It never touches
+// the workflow, its tests, or the record `undo` uses.
+function runUiDiscard() {
+  const asJson = args.includes("--json");
+  const noDocker = !!process.env.N8N_DEV_TEST_EDITOR_STATE;       // the tests' stand-in for Docker: there is nothing to remove
+  if (!noDocker) chamberCmd("down");
+  for (const p of ["ui-export", "ui-variants", "ui-manifest.json"]) fs.rmSync(path.join(WORK, p), { recursive: true, force: true });
+  const left = noDocker ? { status: 0, stdout: "" } : chamberCmd("status");
+  const cleaned = left.status === 0;
+  if (asJson) console.log(JSON.stringify({ state: "discarded", cleaned }));
+  else console.log(cleaned ? "Discarded. Nothing is left." : "Discarded, but something may be left over:\n" + (left.stdout || ""));
+  return cleaned ? 0 : 1;
+}
+
+// Brings back an editor that was stopped (a restart, a crash) with its contents, if the workflow has not moved on.
+function runUiResume() {
+  const asJson = args.includes("--json");
+  const out = (obj, code) => { console.log(asJson ? JSON.stringify(obj) : (obj.message ?? obj.state)); return code; };
+  const info = sessionInfo();
+  if (!["editor-stopped", "editor-running"].includes(info.kind)) return out({ state: "nothing-to-resume", session: info, message: "There is no earlier editor to bring back." }, 1);
+  if (info.drift) return out({ state: "drifted", session: info, message: "The workflow has changed since that editor was opened, so it is not brought back." }, 1);
+  const r = chamberCmd("resume");
+  const text = `${r.stdout || ""}${r.stderr || ""}`;
+  const address = text.match(/READY (\S+)/)?.[1];
+  if (r.status !== 0 || !address) return out({ state: "failed", session: info, message: "The editor did not come back.", details: text.trim().slice(-400) }, 1);
+  const login = text.match(/sign in with:\s+(\S+)\s+\/\s+(\S+)/);
+  return out({ state: "resumed", address, login: login ? { email: login[1], password: login[2] } : null, workflow: info.workflow, session: info }, 0);
 }
 
 // ---------- ui-stop: save the edits from a chamber started with `ui --detach`, then remove it ----------
@@ -668,12 +731,15 @@ function report(wf, s, st, tests) {
 if (cmd === "init") { (await import("./init.mjs")).init(ROOT, args.slice(1)); process.exit(0); }
 if (cmd === "pull") process.exit(runPull());
 if (cmd === "ui-stop") process.exit(runUiStop());
+if (cmd === "session") process.exit(runSession());
+if (cmd === "ui-discard") process.exit(runUiDiscard());
+if (cmd === "ui-resume") process.exit(runUiResume());
 if (cmd === "undo") process.exit(runUndo());
 if (cmd === "status") {   // is a sealed editor still open? Exit 0 = clean, 1 = something is there, 2 = could not tell
   process.exit(spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" }).status ?? 2);
 }
 if (!["scan", "structure", "test", "check", "ui", "tests-fix", "submit-facts", "submit"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix|submit-facts|submit> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | undo [--json] | status");
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix|submit-facts|submit> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | ui-resume [--json] | ui-discard [--json] | session [--json] | undo [--json] | status");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));

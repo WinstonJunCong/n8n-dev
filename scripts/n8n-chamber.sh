@@ -7,6 +7,8 @@
 #   ./scripts/n8n-chamber.sh run <dir> [export-dir]  load the faked workflows, start, wait; on Ctrl+C save any edits to export-dir, then remove everything
 #   ./scripts/n8n-chamber.sh down       remove it (containers, network and its data), then report status
 #   ./scripts/n8n-chamber.sh status     report whether anything is left: prints CLEAN (exit 0) or LEFTOVERS (exit 1)
+#   ./scripts/n8n-chamber.sh state      what the editor is doing: running | stopped | none | unknown
+#   ./scripts/n8n-chamber.sh resume     bring a stopped editor back with its contents intact (never creates or deletes anything)
 #
 # One window in, no door out:
 #   IN   your browser reaches the editor at 127.0.0.1 only, through a tiny forwarder container.
@@ -266,6 +268,31 @@ stop() {
   finish
 }
 
+# What state is the editor container in? Prints running | stopped | none | unknown (Docker is not running).
+editor_state() {
+  docker info >/dev/null 2>&1 || { echo unknown; return 0; }
+  local s
+  s=$(docker inspect -f '{{.State.Status}}' "$APP" 2>/dev/null) || { echo none; return 0; }
+  if [ "$s" = running ]; then echo running; else echo stopped; fi
+}
+
+# Brings an editor that was stopped (a restart, a crash) back WITHOUT touching its contents: the same containers and the
+# same throwaway data, on the same address. Nothing is created or deleted, so nothing typed into it is lost.
+resume() {
+  docker info >/dev/null 2>&1 || { echo "UNKNOWN: Docker is not running."; return 2; }
+  if ! docker inspect "$APP" >/dev/null 2>&1 || ! docker inspect "$FWD" >/dev/null 2>&1 \
+     || ! docker volume inspect "$VOL" >/dev/null 2>&1 || ! docker network inspect "$NET" >/dev/null 2>&1; then
+    echo "NOTHING: there is no earlier editor to bring back."; return 1
+  fi
+  docker start "$APP" >/dev/null 2>&1 || { echo "Could not start the editor."; return 1; }
+  docker start "$FWD" >/dev/null 2>&1 || { echo "Could not start the editor's window."; return 1; }
+  PORT=$(docker port "$FWD" 5678/tcp 2>/dev/null | head -1 | sed 's/.*://')     # the address it had before
+  [ -n "$PORT" ] || PORT=5678
+  wait_ready || { echo "The editor did not start. Logs: docker logs $APP"; return 1; }
+  echo "READY http://127.0.0.1:$PORT"
+  echo "Open http://127.0.0.1:$PORT and sign in with:  test@test.com  /  Test1234"
+}
+
 case "${1:-}" in
   proof) proof ;;
   run)   run "${2:-}" "${3:-}" ;;
@@ -274,5 +301,7 @@ case "${1:-}" in
   up)    up "${2:-}" && wait_ready && echo "Chamber is up: http://127.0.0.1:$PORT   (stop it with: ./scripts/n8n-chamber.sh down)" ;;
   down)  down; echo "Chamber removed."; status ;;
   status) status ;;
-  *)     echo "usage: n8n-chamber.sh <proof|run <dir> [export-dir]|start <dir>|stop [export-dir]|up [dir]|down|status>"; exit 2 ;;
+  state)  editor_state ;;
+  resume) resume ;;
+  *)     echo "usage: n8n-chamber.sh <proof|run <dir> [export-dir]|start <dir>|stop [export-dir]|up [dir]|down|status|state|resume>"; exit 2 ;;
 esac

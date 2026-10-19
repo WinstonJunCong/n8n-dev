@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JARGON, describeChanges, describeNotApplied, plainAssertion,
-  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForPreview, replyForApply, replyForStatus,
+  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, describeOffer, replyForPreview, replyForApply, replyForStatus,
 } from "./replies.mjs";
 
 // The part of a reply meant for the person: without the line for the assistant and the support details.
@@ -213,6 +213,14 @@ const everyReply = () => {
   out.push(replyForSubmitPreview({ state: "ready", testsChanged: true, testsRemoved: true, noTestReason: "a typo" }, facts, "1"), replyForSubmitPreview({ state: "ready", testsChanged: false, testsRemoved: false, noTestReason: "a typo" }, { ...facts, tests: [] }, "1"));
   for (const code of ["editor-open", "editor-unknown", "no-check", "check-stale", "check-failed", "no-change", "other-files", "workflow-without-test", "reason-too-long", "no-git", "no-repo", "no-base", "no-facts", "shared-changed", "open-submission", "rate-limit", "other"]) out.push(replyForSubmitPreview({ state: "blocked", reasons: [{ code, count: 1, max: 3 }] }, facts));
   out.push(replyForSubmitPreview({ state: "ready", testsChanged: true, testsRemoved: false, noTestReason: null }, { ...facts, fetched: false }, "1"), replyForSubmitRefused("too-soon"), replyForSubmitRefused("no-words"));
+  const left = { kind: "editor-stopped", workflow: "flows/demo", drift: false, changes: 2, ageMs: 5 * 3600_000, age: "about 5 hours ago", stale: false };
+  for (const s of [left, { ...left, kind: "editor-running" }, { ...left, kind: "editor-orphan" }, { ...left, kind: "saved-edits" }, { ...left, stale: true, age: "5 days ago" }, { ...left, drift: true }, { ...left, kind: "saved-edits", drift: true }, { ...left, age: null }, { kind: "none" }, { kind: "unknown" }]) {
+    out.push(replyForSession(s));
+    const refused = replyForStartRefused({ state: "already-running", session: s });
+    if (refused) out.push(refused);
+  }
+  for (const j of [{ state: "resumed", address: "http://127.0.0.1:5678", login: { email: "a@b.c", password: "p" } }, { state: "drifted", session: left }, { state: "nothing-to-resume" }, { state: "failed", details: "docker: boom" }]) out.push(replyForResume(j));
+  for (const j of [{ state: "discarded", cleaned: true }, { state: "discarded", cleaned: false }, { state: "no-words" }, { state: "failed" }]) out.push(replyForDiscard(j));
   out.push(replyForSend({ state: "sent" }, "https://github.com/acme/flows/pull/new/n8n-dev/demo-20261018-0705"), replyForSend({ state: "sent" }, null));
   for (const state of ["nothing", "push-failed", "no-identity", "no-remote", "no-git", "no-repo", "no-base", "failed", "bad-branch"]) out.push(replyForSend({ state, details: "fatal: could not read Username" }, null));
   for (const state of ["ready", "nothing", "unexplained", "no-change", "wrong-workflow", "failed", "other"]) out.push(replyForTestFix({ state, updates: [{ test: "Down", from: "a", to: "b" }], unexplained: [{ test: "Other", reason: "unrelated", assertion: 'node "N" called 1 time', detail: "called 0 time(s)" }, { test: "B", reason: "error" }], expected: "a", given: "b" }, "1"));
@@ -378,4 +386,52 @@ test("the new reasons a change cannot go are plain and not errors", () => {
     assert.ok(forPerson(r.text).length > 60, code);
   }
   assert.match(replyForSubmitPreview({ state: "blocked", reasons: [{ code: "rate-limit", max: 3 }] }, {}).text, /already sent 3 changes/);
+});
+
+// ---------- what an earlier editor left behind ----------
+const LEFTOVER = { kind: "editor-stopped", workflow: "flows/demo", drift: false, changes: 2, ageMs: 5 * 3600_000, age: "about 5 hours ago", stale: false };
+
+test("an offer says what was found, how old it is, and the choices, with the tool names only for the assistant", () => {
+  const r = replyForSession(LEFTOVER);
+  assert.match(forPerson(r.text), /A test editor from about 5 hours ago was stopped/);
+  assert.match(forPerson(r.text), /bring it back so you can carry on, close it and keep your changes, or throw it away/);
+  assert.doesNotMatch(forPerson(r.text), /ui_resume|ui_stop|ui_discard/);
+  assert.match(r.text, /For you, the assistant.*ui_resume.*ui_stop.*ui_discard/s);
+});
+
+test("a missing age is said as 'earlier', and an unknown kind is not an offer", () => {
+  assert.match(replyForSession({ ...LEFTOVER, age: null }).text, /from earlier was stopped/);
+  assert.equal(describeOffer({ kind: "none" }), null);
+  assert.match(replyForSession({ kind: "none" }).text, /nothing is waiting from earlier/);
+  assert.equal(replyForSession({ kind: "unknown" }).isError, true);
+  assert.match(replyForSession({ kind: "editor-orphan", drift: null, changes: null }).text, /close it, or throw it away/);
+});
+
+test("stale and drifted leftovers are described honestly and the carry-on choice is withdrawn when it cannot work", () => {
+  assert.match(describeOffer({ ...LEFTOVER, stale: true, age: "5 days ago" }).text, /Throwing it away is usually the safe choice/);
+  const drifted = describeOffer({ ...LEFTOVER, drift: true });
+  assert.match(drifted.text, /may no longer fit it/);
+  assert.doesNotMatch(drifted.text, /bring it back/);
+  assert.doesNotMatch(drifted.hint, /ui_resume/);
+  assert.match(describeOffer({ ...LEFTOVER, kind: "saved-edits", changes: 1 }).text, /1 change from about 5 hours ago that were saved/);
+  assert.match(describeOffer({ ...LEFTOVER, kind: "saved-edits", drift: true }).hint, /it will refuse, the workflow moved/);
+});
+
+test("a refused start offers the choices; without a session it falls back to the plain reply", () => {
+  const refused = replyForStartRefused({ state: "already-running", session: LEFTOVER });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /haven't opened a new editor, because there is already something from before/);
+  assert.equal(replyForStartRefused({ state: "already-running" }), null);
+});
+
+test("bringing an editor back, and throwing one away, are said plainly", () => {
+  const back = replyForResume({ state: "resumed", address: "http://127.0.0.1:5678", login: { email: "a@b.c", password: "p" } });
+  assert.match(back.text, /Your earlier test editor is back, with your changes in it/);
+  assert.match(back.text, /For you, the assistant.*STOP/s);
+  assert.match(replyForResume({ state: "drifted", session: { ...LEFTOVER, drift: true } }).text, /haven't brought it back/);
+  assert.equal(replyForResume({ state: "nothing-to-resume" }).isError, true);
+  assert.equal(replyForDiscard({ state: "discarded", cleaned: true }).isError, false);
+  assert.equal(replyForDiscard({ state: "discarded", cleaned: false }).isError, true);
+  assert.match(replyForDiscard({ state: "no-words" }).text, /Say the word/);
+  assert.equal(replyForDiscard({ state: "whatever" }).isError, true);
 });
