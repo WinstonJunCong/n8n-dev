@@ -8,6 +8,8 @@
 //   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
 //   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
 //   n8n-dev tests-fix <workflow-dir> [--apply] [--from-report f]  update tests that fail only because they expect the wording just changed (dry run unless --apply)
+//   n8n-dev test-add <workflow-dir> --spec <json> --words <text> [--apply]   check, and with --apply write, a new test built from a person's words (dry run unless --apply)
+//   n8n-dev test-remove <workflow-dir> --file <name.yaml>       delete a test that test-add wrote, if nobody edited it since
 //   n8n-dev submit <workflow-dir> --branch n8n-dev/<name> --message <text>   send the workflow folder to a NEW branch of the team repository (never the shared branch)
 //   n8n-dev submit-facts <workflow-dir> [--fetch]                          what differs from the shared branch (read-only, JSON), for the submit checks
 //   n8n-dev undo                                                put back workflow.json as it was before the last pull --apply (only if untouched since)
@@ -25,11 +27,12 @@ import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml, parseDocument } from "yaml";
+import { parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { buildPlan, describeOps, planToJson, decidePull } from "./pull.mjs";
 import { startVerdict, savedSince, describeSession, startRefusal, agePhrase } from "./session.mjs";
 import { findBash } from "./shell.mjs";
-import { makeRecord, addTestEdits, decideUndo, safeRelative } from "./backup.mjs";
+import { makeRecord, addTestEdits, decideUndo, safeRelative, textHash } from "./backup.mjs";
+import { parseSpec, validateSpec, commentLine, nextTestFile, LIMITS as TEST_LIMITS } from "./testspec.mjs";
 import { planTestUpdates, rewriteTestText } from "./testfix.mjs";
 import { computePatch } from "./merge.mjs";
 
@@ -595,6 +598,57 @@ function runTestsFix(wf) {
   return out({ state: "applied", ...facts, message: "Updated." }, 0);
 }
 
+// ---------- test-add / test-remove: tests written from a person's own words ----------
+// `test-add` checks a structured description (testspec.mjs) against this workflow and, with --apply, writes it as a new test
+// file whose first lines quote the person's words. It never changes an existing test. `test-remove` deletes only a test
+// that `test-add` wrote, and only if nobody has edited it since.
+const DRAFTS_FILE = path.join(WORK, "drafted-tests.json");
+const readDrafts = () => { try { const r = JSON.parse(fs.readFileSync(DRAFTS_FILE, "utf8")); return Array.isArray(r) ? r : []; } catch { return []; } };
+
+function runTestAdd(wf) {
+  const out = (obj, code) => { console.log(JSON.stringify(obj)); return code; };
+  const parsed = parseSpec(flag("--spec"));
+  if (parsed.error) return out({ state: "invalid", errors: [parsed.error] }, 1);
+  const words = commentLine(flag("--words"));
+  if (!words) return out({ state: "invalid", errors: [{ code: "no-words" }] }, 1);
+  const testDir = path.join(wfDir, "tests");
+  const files = fs.existsSync(testDir) ? fs.readdirSync(testDir).filter((f) => /\.ya?ml$/.test(f)).sort() : [];
+  if (files.length >= TEST_LIMITS.tests) return out({ state: "invalid", errors: [{ code: "too-many-tests", max: TEST_LIMITS.tests }] }, 1);
+  const existingNames = files.map((f) => { try { return parseYaml(fs.readFileSync(path.join(testDir, f), "utf8"))?.test; } catch { return null; } }).filter(Boolean);
+  const steps = wf.nodes.map((n) => ({ name: n.name, outside: isOutside(n), trigger: isTrigger(n) }));
+  const v = validateSpec(parsed.spec, { steps, existingNames });
+  if (!v.ok) return out({ state: "invalid", errors: v.errors }, 1);
+  const file = nextTestFile(files, v.test.test);
+  const text = `# Written from the person's own words:\n# "${words}"\n${stringifyYaml(v.test)}`;
+  try { if (JSON.stringify(parseYaml(text)) !== JSON.stringify(v.test)) throw new Error("did not read back the same"); }
+  catch (e) { return out({ state: "failed", message: "The test would not be written correctly: " + e.message }, 1); }
+  const facts = { workflow: rel(wfDir), file, name: v.test.test, when: { trigger: v.test.trigger, services: v.test.mocks ?? {} }, then: parsed.spec.then, unmocked: v.unmocked };
+  if (!args.includes("--apply")) return out({ state: "ready", ...facts }, 0);
+  try {
+    fs.writeFileSync(path.join(testDir, file), text, { flag: "wx" });                       // never overwrites anything
+    fs.mkdirSync(WORK, { recursive: true });
+    fs.writeFileSync(DRAFTS_FILE, JSON.stringify([...readDrafts(), { workflow: rel(wfDir), file: `${rel(wfDir)}/tests/${file}`, name: v.test.test, hash: textHash(text), words, at: new Date().toISOString() }].slice(-200), null, 2));
+  } catch (e) { return out({ state: "failed", message: e.message }, 1); }
+  return out({ state: "added", ...facts }, 0);
+}
+
+function runTestRemove() {
+  const out = (obj, code) => { console.log(JSON.stringify(obj)); return code; };
+  const file = flag("--file");
+  if (!file || file !== path.basename(file) || !/\.ya?ml$/.test(file)) return out({ state: "bad-file" }, 2);
+  const dir = rel(wfDir), key = `${dir}/tests/${file}`;
+  const drafts = readDrafts();
+  const record = drafts.find((r) => r.file === key);
+  if (!record) return out({ state: "not-drafted" }, 1);                                     // only tests this tool wrote can be removed
+  const target = path.join(wfDir, "tests", file);
+  const forget = () => fs.writeFileSync(DRAFTS_FILE, JSON.stringify(drafts.filter((r) => r !== record), null, 2));
+  if (!fs.existsSync(target)) { forget(); return out({ state: "already-gone", file, name: record.name ?? null }, 0); }
+  if (textHash(fs.readFileSync(target, "utf8")) !== record.hash) return out({ state: "changed-since", file, name: record.name ?? null }, 1);
+  fs.rmSync(target);
+  forget();
+  return out({ state: "removed", file, name: record.name ?? null }, 0);
+}
+
 // ---------- submit-facts: what differs from the shared version, for the submit gates ----------
 // Read-only: compares this workflow's folder with the shared branch using only local Git data (no network). The MCP server
 // decides what is allowed from these facts (see mcp/submit.mjs); this command only reports.
@@ -738,8 +792,8 @@ if (cmd === "undo") process.exit(runUndo());
 if (cmd === "status") {   // is a sealed editor still open? Exit 0 = clean, 1 = something is there, 2 = could not tell
   process.exit(spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" }).status ?? 2);
 }
-if (!["scan", "structure", "test", "check", "ui", "tests-fix", "submit-facts", "submit"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix|submit-facts|submit> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | ui-resume [--json] | ui-discard [--json] | session [--json] | undo [--json] | status");
+if (!["scan", "structure", "test", "check", "ui", "tests-fix", "submit-facts", "submit", "test-add", "test-remove"].includes(cmd) || !wfDir) {
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix|submit-facts|submit|test-add|test-remove> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | ui-resume [--json] | ui-discard [--json] | session [--json] | undo [--json] | status");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
@@ -747,6 +801,8 @@ if (cmd === "ui") { openUi(wf); process.exit(0); }
 if (cmd === "tests-fix") process.exit(runTestsFix(wf));
 if (cmd === "submit-facts") process.exit(runSubmitFacts());
 if (cmd === "submit") process.exit(runSubmit());
+if (cmd === "test-add") process.exit(runTestAdd(wf));
+if (cmd === "test-remove") process.exit(runTestRemove());
 const s =["scan", "check"].includes(cmd) ? scan(wf) : null;
 const st = ["structure", "check"].includes(cmd) ? structure(wf) : null;
 const tests = ["test", "check"].includes(cmd) ? runTests(wf) : null;

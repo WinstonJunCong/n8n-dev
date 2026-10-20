@@ -33,6 +33,9 @@ It is a **thin, guarded wrapper over the same command line** you can run yoursel
 | `ui_start` | Opens the sealed editor with the faked tests loaded; returns the address and login |
 | `explain_test_failures` | After a change, finds tests that fail only because they expect the old wording and says so plainly; never touches any other failure |
 | `update_tests` | Updates just those tests, after the person confirms (one-time code); `undo_change` takes it back too |
+| `draft_test_preview` | Turns what the person says should happen into a test and shows it in plain when/then sentences; writes nothing |
+| `draft_test_save` | Adds the previewed test (one-time code and the person's own words); it fails until the workflow does what it says |
+| `draft_test_remove` | Takes back a test that `draft_test_save` added, if nobody edited it since |
 | `submit_preview` | Shows exactly what would be sent for review and whether every gate passes; sends nothing (the send step is next) |
 | `submit` | Sends the previewed change to the team for review as a new proposal (needs the code and the person's own words); returns the review link |
 | `undo_change` | Puts the workflow back as it was before the last applied change (one step, only if untouched since) |

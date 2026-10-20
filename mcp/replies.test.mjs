@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JARGON, describeChanges, describeNotApplied, plainAssertion,
-  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, describeOffer, replyForPreview, replyForApply, replyForStatus,
+  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, describeOffer, describeWhenThen, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved, replyForPreview, replyForApply, replyForStatus,
 } from "./replies.mjs";
 
 // The part of a reply meant for the person: without the line for the assistant and the support details.
@@ -221,6 +221,11 @@ const everyReply = () => {
   }
   for (const j of [{ state: "resumed", address: "http://127.0.0.1:5678", login: { email: "a@b.c", password: "p" } }, { state: "drifted", session: left }, { state: "nothing-to-resume" }, { state: "failed", details: "docker: boom" }]) out.push(replyForResume(j));
   for (const j of [{ state: "discarded", cleaned: true }, { state: "discarded", cleaned: false }, { state: "no-words" }, { state: "failed" }]) out.push(replyForDiscard(j));
+  const draft = { state: "ready", name: "Down site", when: { trigger: { site: "docs", n: 2 }, services: { "Check status": [{ status: "down" }] } }, then: [{ step: "Send alert", runs: 1 }, { step: "Ignore", doesNotRun: true }, { step: "Compose", field: "text", contains: "y" }, { endsAt: "Send alert" }], unmocked: ["Send alert"] };
+  out.push(replyForDraftPreview(draft, "1", "When a site is down, alert."), replyForDraftPreview({ ...draft, unmocked: [] }, "1", "w"), replyForDraftPreview({ state: "nope" }));
+  for (const code of ["bad-name", "name-taken", "unknown-step", "not-outside", "empty-then", "too-many-checks", "duplicate-check", "step-name-unsupported", "too-many-tests", "no-words", "bad-json"]) out.push(replyForDraftPreview({ state: "invalid", errors: [{ code, name: "X", step: "Y", steps: ["A"], outside: ["A"], max: 3 }] }));
+  out.push(replyForDraftRefused("too-soon"), replyForDraftRefused("no-words"), replyForDraftSaved({ state: "added", name: "Down site" }), replyForDraftSaved({ state: "failed" }));
+  for (const state of ["removed", "already-gone", "not-drafted", "changed-since", "bad-file", "other"]) out.push(replyForDraftRemoved({ state, file: "04-x.yaml", name: "Down site" }));
   out.push(replyForSend({ state: "sent" }, "https://github.com/acme/flows/pull/new/n8n-dev/demo-20261018-0705"), replyForSend({ state: "sent" }, null));
   for (const state of ["nothing", "push-failed", "no-identity", "no-remote", "no-git", "no-repo", "no-base", "failed", "bad-branch"]) out.push(replyForSend({ state, details: "fatal: could not read Username" }, null));
   for (const state of ["ready", "nothing", "unexplained", "no-change", "wrong-workflow", "failed", "other"]) out.push(replyForTestFix({ state, updates: [{ test: "Down", from: "a", to: "b" }], unexplained: [{ test: "Other", reason: "unrelated", assertion: 'node "N" called 1 time', detail: "called 0 time(s)" }, { test: "B", reason: "error" }], expected: "a", given: "b" }, "1"));
@@ -434,4 +439,64 @@ test("bringing an editor back, and throwing one away, are said plainly", () => {
   assert.equal(replyForDiscard({ state: "discarded", cleaned: false }).isError, true);
   assert.match(replyForDiscard({ state: "no-words" }).text, /Say the word/);
   assert.equal(replyForDiscard({ state: "whatever" }).isError, true);
+});
+
+// ---------- tests written from the person's own words ----------
+const DRAFT = { state: "ready", name: "Down site", when: { trigger: { site: "docs", n: 2, ok: true, nested: { a: 1 } }, services: { "Check status": [{ status: "down", latency_ms: 1200 }, { status: "up" }] } },
+  then: [{ step: "Send alert", runs: 1 }, { step: "Send alert", runs: 3 }, { step: "Ignore", doesNotRun: true }, { step: "Compose", field: "reminder_count", side: "output", is: 3 },
+    { step: "Compose", field: "text", isNot: "x" }, { step: "Compose", field: "a.b", contains: "y" }, { endsAt: "Send alert" }], unmocked: ["Send alert"] };
+
+test("a test is described in plain when/then sentences for every kind of check", () => {
+  const { when, then } = describeWhenThen(DRAFT);
+  assert.equal(when[0], "A request comes in with site = “docs”, n = 2, ok = true, nested = {\"a\":1}");
+  assert.equal(when[1], "“Check status” answers with status = “down”, latency ms = 1200, and then with status = “up”");
+  assert.deepEqual(then, [
+    "“Send alert” runs once", "“Send alert” runs 3 times", "“Ignore” does not run",
+    "The reminder count going out of “Compose” is 3", "The text going into “Compose” is not “x”", "The a b going into “Compose” contains “y”",
+    "The workflow finishes at “Send alert”",
+  ]);
+  assert.equal(describeWhenThen({ when: {}, then: [] }).when[0], "A request comes in");
+});
+
+test("a long value is shortened, not dumped", () => {
+  const long = { when: { trigger: { blob: { text: "x".repeat(200) } } }, then: [] };
+  assert.ok(describeWhenThen(long).when[0].length < 120);
+  assert.match(describeWhenThen(long).when[0], /…$/);
+});
+
+test("the preview keeps the code for the assistant and the person's words in front of the person", () => {
+  const r = replyForDraftPreview(DRAFT, "737373", "When a site is down, alert.");
+  assert.match(forPerson(r.text), /You said: “When a site is down, alert\.”/);
+  assert.match(forPerson(r.text), /Nothing has been added yet/);
+  assert.doesNotMatch(forPerson(r.text), /737373|draft_test_save/);
+  assert.match(r.text, /For you, the assistant.*737373.*STOP.*draft_test_save.*theirWords/s);
+  assert.doesNotMatch(replyForDraftPreview({ ...DRAFT, unmocked: [] }, "1", "w").text, /no pretend answer/);
+});
+
+test("every way a described test can be refused has a plain sentence, and the format for the assistant", () => {
+  const errors = [
+    { code: "bad-name" }, { code: "name-taken", name: "X" }, { code: "unknown-step", step: "Y", steps: ["A", "B"] }, { code: "not-outside", step: "Z", outside: ["A"] },
+    { code: "empty-then" }, { code: "too-many-checks", max: 10 }, { code: "duplicate-check" }, { code: "step-name-unsupported", step: 'a"b' },
+    { code: "too-many-tests", max: 30 }, { code: "no-words" },
+  ];
+  for (const e of errors) {
+    const r = replyForDraftPreview({ state: "invalid", errors: [e] }, undefined, undefined);
+    assert.match(forPerson(r.text), /can't add that test yet/, e.code);
+    assert.ok(forPerson(r.text).length > 40, e.code);
+    assert.match(r.text, /For you, the assistant.*"then"/s, e.code);
+  }
+  assert.match(replyForDraftPreview({ state: "invalid", errors: [{ code: "bad-json" }, { code: "bad-trigger" }] }).text, /adjust how I've described that test/);
+  assert.equal(replyForDraftPreview({ state: "nope" }).isError, true);
+});
+
+test("saving, refusing and removing are said plainly", () => {
+  assert.match(replyForDraftSaved({ state: "added", name: "Down site" }).text, /Added the test “Down site”.*fail until your workflow does this/s);
+  assert.match(replyForDraftSaved({ state: "added", name: "Down site" }).text, /For you, the assistant.*ui_start/s);
+  assert.match(replyForDraftSaved({ state: "invalid", errors: [{ code: "name-taken", name: "X" }] }).text, /already a test called/);
+  assert.equal(replyForDraftSaved({ state: "failed" }).isError, true);
+  assert.match(forPerson(replyForDraftRefused("too-soon").text), /go-ahead first/);
+  assert.match(forPerson(replyForDraftRefused("no-words").text), /need to hear from you/);
+  for (const [state, isError] of [["removed", false], ["already-gone", false], ["not-drafted", true], ["changed-since", true], ["bad-file", true], ["other", true]]) {
+    assert.equal(replyForDraftRemoved({ state, file: "04-x.yaml", name: "Down site" }).isError, isError, state);
+  }
 });

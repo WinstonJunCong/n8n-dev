@@ -3,12 +3,13 @@
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
 import { decideSubmit, branchName, commitMessage, compareUrl } from "./submit.mjs";
-import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForStatus, replyForSession, replyForStartRefused, replyForResume, replyForDiscard } from "./replies.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForStatus, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved } from "./replies.mjs";
 
 const MINUTE = 60_000;
 export const MIN_OPEN_MS = 30_000;       // an editor the person has only just been given cannot be closed yet
 export const MIN_CONFIRM_MS = 10_000;     // the person must have had time to read a preview before it can be sent
 const MAX_WORDS = 200;
+const MAX_REQUEST_WORDS = 500;     // the person's description of what should happen
 const CLI_ENV = { N8N_CMD: "./scripts/n8n-docker.sh" };      // how `check` reaches the offline n8n
 const MANIFEST = ".n8n-dev/ui-manifest.json";
 const EXPORT_DIR = ".n8n-dev/ui-export";
@@ -16,7 +17,7 @@ const LAST_APPLY = ".n8n-dev/last-apply.json";
 
 export function createTools({ fsx, runCli, codes, now = Date.now }) {
   // What the tools remember between calls: the latest check of each workflow, and which one is open (and since when).
-  const state = { checks: {}, chamber: null, openedAt: null, previewedAt: {} };
+  const state = { checks: {}, chamber: null, openedAt: null, previewedAt: {}, drafts: {} };
   const result = (text, isError = false) => ({ text: truncate(text), isError });
 
   const workflowsDir = () => {
@@ -277,6 +278,75 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
         if (!j) return result(unclear, true);
         if (j.state === "applied") delete state.checks[a.value.workflow];
         return plain(replyForTestUpdate(j));
+      },
+    },
+    {
+      name: "draft_test_preview",
+      title: "Preview a test written from the person's words",
+      description: "Turn what the person says should happen into a test, and show it to them in plain when/then sentences before anything is written. It writes nothing. Put the person's own words, copied exactly, in theirWords: the test keeps them as a note so a reviewer sees what was asked for. Write the test only from what the person said, never from what the workflow currently does. spec is a JSON string: {\"name\":\"short name\",\"when\":{\"trigger\":{...the starting event's data...},\"services\":{\"<a step that talks to an outside service>\":[{...its pretend answer...}]}},\"then\":[{\"step\":\"S\",\"runs\":1},{\"step\":\"S\",\"doesNotRun\":true},{\"step\":\"S\",\"side\":\"input or output\",\"field\":\"a.b\",\"is or contains or isNot\":\"value\"},{\"endsAt\":\"S\"}]}. Step names must be exactly those in the workflow. It refuses with the reasons if the description does not fit. If it is ready it returns a one-time code. After showing the person the result, STOP and wait for them to reply before calling draft_test_save.",
+      inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" }, spec: { type: "string", description: "The test as a JSON string (see the tool description)" }, theirWords: { type: "string", description: "The person's own words describing what should happen, copied exactly" } }, required: ["workflow", "spec", "theirWords"], additionalProperties: false },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, { workflow: { type: "string", required: true }, spec: { type: "string", required: true }, theirWords: { type: "string", required: true } });
+        if (a.error) return result(a.error, true);
+        const w = pick(a.value.workflow);
+        if (w.error) return result(w.error, true);
+        const words = a.value.theirWords.trim();
+        if (!words || words.length > MAX_REQUEST_WORDS) return plain(replyForDraftPreview({ state: "invalid", errors: [{ code: "no-words" }] }));
+        const r = await run(["test-add", w.dir, "--spec", a.value.spec, "--words", words], { timeoutMs: MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        if (j.state !== "ready") return plain(replyForDraftPreview(j));
+        const code = codes.issue(`draft:${a.value.workflow}:${hashOf({ content: workflowHash(w.dir), spec: a.value.spec, words })}`);
+        for (const old of Object.keys(state.drafts)) if (state.drafts[old].workflow === a.value.workflow) delete state.drafts[old];     // a new preview replaces the old one
+        state.drafts[code] = { workflow: a.value.workflow, spec: a.value.spec, words, shownAt: now() };
+        return plain(replyForDraftPreview(j, code, words));
+      },
+    },
+    {
+      name: "draft_test_save",
+      title: "Add the previewed test",
+      description: "Add the test that draft_test_preview showed. ONLY call this after the person has seen the test and told you in their own words to add it (put their words in theirWords). Never in the same step as draft_test_preview. It needs the code from the preview, and only works if nothing changed since. It adds one new test and never changes an existing one. The new test will fail until the workflow does what it says: that is expected.",
+      inputSchema: { type: "object", properties: { workflow: { type: "string" }, code: { type: "string", description: "The code from draft_test_preview" }, theirWords: { type: "string", description: "The person's own words saying to add it, copied exactly" } }, required: ["workflow", "code", "theirWords"], additionalProperties: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, { workflow: { type: "string", required: true }, code: { type: "string", required: true }, theirWords: { type: "string", required: true } });
+        if (a.error) return result(a.error, true);
+        const w = pick(a.value.workflow);
+        if (w.error) return result(w.error, true);
+        const confirmation = a.value.theirWords.trim();
+        if (!confirmation || confirmation.length > MAX_WORDS) return plain(replyForDraftRefused("no-words"));
+        const draft = state.drafts[a.value.code];
+        if (!draft || draft.workflow !== a.value.workflow) return result("That code is not valid. Preview the test again to get a new one.", true);
+        if (now() - draft.shownAt < MIN_CONFIRM_MS) return plain(replyForDraftRefused("too-soon"));
+        const redeemed = codes.redeem(a.value.code, `draft:${a.value.workflow}:${hashOf({ content: workflowHash(w.dir), spec: draft.spec, words: draft.words })}`);
+        if (!redeemed.ok) return result(redeemed.reason, true);
+        delete state.drafts[a.value.code];
+        const r = await run(["test-add", w.dir, "--spec", draft.spec, "--words", draft.words, "--apply"], { timeoutMs: MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        if (j.state === "added") delete state.checks[a.value.workflow];       // the tests changed, so an earlier check no longer counts
+        return plain(replyForDraftSaved(j));
+      },
+    },
+    {
+      name: "draft_test_remove",
+      title: "Take back a test I added",
+      description: "Remove a test that draft_test_save added, if the person has changed their mind. It can only remove tests added that way, and only if nobody has edited them since. ONLY call this when the person asks for it in their own words (put them in theirWords). The file name is the one draft_test_save reported.",
+      inputSchema: { type: "object", properties: { workflow: { type: "string" }, file: { type: "string", description: "The test's file name, for example 02-down-site-sends-an-alert.yaml" }, theirWords: { type: "string", description: "The person's own words asking to take it back, copied exactly" } }, required: ["workflow", "file", "theirWords"], additionalProperties: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, { workflow: { type: "string", required: true }, file: { type: "string", required: true }, theirWords: { type: "string", required: true } });
+        if (a.error) return result(a.error, true);
+        const w = pick(a.value.workflow);
+        if (w.error) return result(w.error, true);
+        const words = a.value.theirWords.trim();
+        if (!words || words.length > MAX_WORDS) return plain(replyForDraftRefused("no-words"));
+        const r = await run(["test-remove", w.dir, "--file", a.value.file], { timeoutMs: MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        if (j.state === "removed") delete state.checks[a.value.workflow];
+        return plain(replyForDraftRemoved(j));
       },
     },
     {
