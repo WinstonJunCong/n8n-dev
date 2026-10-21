@@ -127,3 +127,12 @@ test("a start is refused with the right reason for each thing an earlier session
   assert.equal(startRefusal({ verdict: ok, session: facts({ editor: "stopped" }) }).state, "already-running", "a stopped editor still holds edits");
   assert.equal(startRefusal({ verdict: no("x"), session: facts({ savedAt: NOW - 1000 }) }).state, "pending-edits");
 });
+
+import { editsConsumed } from "./session.mjs";
+
+test("edits are used up once a change was applied at or after they were saved, and not before", () => {
+  assert.equal(editsConsumed(1000, 1000), true, "applied at the same moment");
+  assert.equal(editsConsumed(1000, 5000), true);
+  assert.equal(editsConsumed(5000, 1000), false, "applied before they were saved");
+  for (const [saved, applied] of [[null, 5], [1000, null], [null, null], [undefined, 5], [5, undefined]]) assert.equal(editsConsumed(saved, applied), false, `${saved}, ${applied}`);
+});

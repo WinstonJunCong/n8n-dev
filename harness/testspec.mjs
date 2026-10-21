@@ -12,7 +12,7 @@
 //               { "endsAt": "Send alert" } ] }
 import { createHash } from "node:crypto";
 
-export const LIMITS = { name: 80, words: 500, specChars: 8000, checks: 10, rows: 10, tests: 30, triggerChars: 2000, value: 300, depth: 4 };
+export const LIMITS = { name: 80, words: 500, specChars: 30000, testsPerPreview: 6, checks: 10, rows: 10, tests: 30, triggerChars: 2000, value: 300, depth: 4 };
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const FIELD_RE = /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$/;
@@ -27,6 +27,19 @@ export function parseSpec(text) {
     const spec = JSON.parse(text);
     return isObj(spec) ? { spec } : { error: { code: "bad-json" } };
   } catch { return { error: { code: "bad-json" } }; }
+}
+
+// One test, or a small set of them for one request (an array). A request such as "also alert when the site is slow" usually
+// needs more than one test: the slow case, and the case just under the line.
+export function parseSpecs(text) {
+  if (typeof text !== "string" || !text.trim()) return { error: { code: "bad-json" } };
+  if (text.length > LIMITS.specChars) return { error: { code: "too-big" } };
+  let value;
+  try { value = JSON.parse(text); } catch { return { error: { code: "bad-json" } }; }
+  const specs = Array.isArray(value) ? value : [value];
+  if (specs.length < 1 || !specs.every(isObj)) return { error: { code: "bad-json" } };
+  if (specs.length > LIMITS.testsPerPreview) return { error: { code: "too-many-in-preview", max: LIMITS.testsPerPreview } };
+  return { specs };
 }
 
 // Plain JSON data only, shallow, with ordinary keys: it goes into a file and into a fake event.

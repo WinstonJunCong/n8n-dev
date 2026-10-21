@@ -1,7 +1,7 @@
 // Unit tests for mcp/guards.mjs. Run with: npm test   (no Docker needed)
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isValidWorkflowName, resolveWorkflow, pickPort, truncate, hashOf, makeRateLimiter, makeCodeStore, strictArgs } from "./guards.mjs";
+import { isValidWorkflowName, resolveWorkflow, pickPort, truncate, hashOf, makeRateLimiter, makeCodeStore, strictArgs, DEFAULT_CODE_LIFETIME_MS } from "./guards.mjs";
 
 // ---------- workflow names ----------
 test("ordinary workflow names are accepted", () => {
@@ -176,4 +176,19 @@ test("strictArgs rejects missing required values, wrong types, and arguments tha
   assert.match(strictArgs({ workflow: null }, spec).error, /Missing required/);
   for (const v of [1, true, ["a"], { a: 1 }]) assert.match(strictArgs({ workflow: v }, spec).error, /must be text/, JSON.stringify(v));
   for (const bad of ["text", 5, true, ["a"]]) assert.match(strictArgs(bad, spec).error, /must be an object/, JSON.stringify(bad));
+});
+
+test("by default a code lasts long enough for a person to read and reply, but not for ever", () => {
+  // the first real session: replies took about 14 and 22 minutes, and 10-minute codes had expired both times
+  for (const minutes of [14, 22, 90]) {
+    const { store, tick } = codes();
+    const code = store.issue("s");
+    tick(minutes * 60_000);
+    assert.equal(store.redeem(code, "s").ok, true, `${minutes} minutes`);
+  }
+  const late = codes();
+  const code = late.store.issue("s");
+  late.tick(3 * 60 * 60_000);
+  assert.match(late.store.redeem(code, "s").reason, /expired/);
+  assert.ok(DEFAULT_CODE_LIFETIME_MS >= 60 * 60_000 && DEFAULT_CODE_LIFETIME_MS <= 24 * 60 * 60_000);
 });

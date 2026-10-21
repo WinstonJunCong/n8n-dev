@@ -197,6 +197,7 @@ function blocked(j) {
 }
 
 export function replyForPreview(j, code) {
+  if (j.state === "already-applied") return reply("Those changes were already applied to your workflow, so there is nothing waiting.");
   if (j.state === "no-session") return reply("I don't have any saved changes to look at. Open the test editor, make a change, then close it so I can keep it.", "call ui_start, then ui_stop once the person is done", true);
   if (j.state === "wrong-workflow") return reply(`Your latest saved changes are for ${q(j.expected)}, not ${q(j.given)}.`, undefined, true);
   if (j.state === "blocked") return reply(`${blocked(j)}${(j.findings ?? []).length ? "" : `\n\n${changesBlock(j)}`}`, undefined, true);
@@ -331,29 +332,33 @@ const DRAFT_ERRORS = {
   "too-many-checks": (e) => `That is more than ${e.max} things for one test. Split it into smaller tests.`,
   "duplicate-check": () => "The same thing is checked twice.",
   "step-name-unsupported": (e) => `The step ${q(e.step)} has a name that tests can't refer to.`,
-  "too-many-tests": (e) => `This workflow already has ${e.max} tests, which is the most I'll add.`,
+  "too-many-tests": (e) => `That would take this workflow past ${e.max} tests, which is the most I'll add.`,
+  "too-many-in-preview": (e) => `That is more than ${e.max} tests at once. Let's do the most important ones first.`,
   "no-words": () => "I need your own words describing what should happen, so the test can show where it came from.",
 };
 const DRAFT_FORMAT = 'spec is JSON: {"name":"…","when":{"trigger":{…},"services":{"<outside step>":[{…}]}},"then":[{"step":"S","runs":1} | {"step":"S","doesNotRun":true} | {"step":"S","side":"input|output","field":"a.b","is|contains|isNot":"v"} | {"endsAt":"S"}]}';
 
 export function replyForDraftPreview(j, code, words) {
   if (j.state === "invalid") {
-    const own = (j.errors ?? []).filter((e) => DRAFT_ERRORS[e.code]).map((e) => DRAFT_ERRORS[e.code](e));
-    const plain = own.length ? `I can't add that test yet:\n${bullets(own)}` : "I need to adjust how I've described that test before I can show it to you. Nothing has been added.";
-    return reply(plain, `fix the description and call draft_test_preview again; problems: ${JSON.stringify(j.errors)}. ${DRAFT_FORMAT}`, false);
+    const several = (j.count ?? 1) > 1;
+    const own = (j.errors ?? []).filter((e) => DRAFT_ERRORS[e.code]).map((e) => {
+      const line = DRAFT_ERRORS[e.code](e);
+      return several && e.index !== undefined ? `Test ${e.index + 1}${e.testName ? ` (${q(e.testName)})` : ""}: ${line}` : line;
+    });
+    const plain = own.length ? `I can't add ${several ? "those tests" : "that test"} yet:\n${bullets(own)}` : "I need to adjust how I've described the test before I can show it to you. Nothing has been added.";
+    return reply(plain, `fix the description and call draft_test_preview again (put every test for this request in ONE preview, as a list); problems: ${JSON.stringify(j.errors)}. ${DRAFT_FORMAT}`, false);
   }
-  if (j.state !== "ready") return reply("I couldn't prepare that test. Nothing has been added.", undefined, true);
-  const wt = describeWhenThen(j);
-  const parts = [
-    "Here is the test I would add, from what you told me.",
-    `You said: ${q(words)}`,
-    `When:\n${bullets(wt.when)}`,
-    `Then:\n${bullets(wt.then)}`,
-  ];
-  if (j.unmocked?.length) parts.push(`These steps talk to outside services but have no pretend answer here: ${j.unmocked.map(q).join(", ")}. If the test reaches one of them it will stop with an error, so tell me if one of them should answer something.`);
-  parts.push("This test will fail until your workflow does this. That's expected: it is the thing you are about to build.");
-  parts.push("Nothing has been added yet. If that is what you want, say so and I'll add it.");
-  return reply(parts.join("\n\n"), `the one-time code is ${code}. Show the person the above and STOP: wait for them to say yes in their own words. Only then call draft_test_save with this code and their words as theirWords. If they want a change, call draft_test_preview again`);
+  if (j.state !== "ready" || !Array.isArray(j.tests)) return reply("I couldn't prepare that test. Nothing has been added.", undefined, true);
+  const many = j.tests.length > 1;
+  const parts = [many ? `Here are the ${j.tests.length} tests I would add, from what you told me.` : "Here is the test I would add, from what you told me.", `You said: ${q(words)}`];
+  j.tests.forEach((t, i) => {
+    const wt = describeWhenThen(t);
+    parts.push(`${many ? `Test ${i + 1}: ${q(t.name)}\n` : ""}When:\n${bullets(wt.when)}\n\nThen:\n${bullets(wt.then)}`);
+    if (t.unmocked?.length) parts.push(`${many ? `In test ${i + 1}, these` : "These"} steps talk to outside services but have no pretend answer here: ${t.unmocked.map(q).join(", ")}. If the test reaches one of them it will stop with an error, so tell me if one of them should answer something.`);
+  });
+  parts.push(many ? "These tests will fail until your workflow does this, except any that already hold today. That's expected: it is the thing you are about to build." : "This test will fail until your workflow does this. That's expected: it is the thing you are about to build.");
+  parts.push(many ? "Nothing has been added yet. If that is what you want, say so and I'll add them all." : "Nothing has been added yet. If that is what you want, say so and I'll add it.");
+  return reply(parts.join("\n\n"), `the one-time code is ${code}. Show the person the above and STOP: wait for them to say yes in their own words. Only then call draft_test_save with this code and their words as theirWords. If they want a change, call draft_test_preview again with the WHOLE set. If the code is later reported out of date, preview again, show it, and wait for a reply: never preview and save in the same step`);
 }
 
 export function replyForDraftRefused(why) {
@@ -362,9 +367,11 @@ export function replyForDraftRefused(why) {
 }
 
 export function replyForDraftSaved(j) {
-  if (j.state === "added") {
-    return reply(`Added the test ${q(j.name)}. It will fail until your workflow does this, which is expected.\n\nThe next step is to open the test editor and make the change.`,
-      `offer to open the editor with ui_start; the new test is loaded with the others. If they change their mind, draft_test_remove takes it back (file ${j.file})`);
+  if (j.state === "added" && Array.isArray(j.tests)) {
+    const names = j.tests.map((t) => q(t.name));
+    const intro = j.tests.length === 1 ? `Added the test ${names[0]}. It will fail until your workflow does this, which is expected.` : `Added ${j.tests.length} tests:\n${bullets(names)}\n\nThey will fail until your workflow does this, except any that already hold today. That is expected.`;
+    return reply(`${intro}\n\nThe next step is to open the test editor and make the change.`,
+      `offer to open the editor with ui_start; the new tests are loaded with the others. If they change their mind, draft_test_remove takes one back (one call per file: ${j.tests.map((t) => t.file).join(", ")})`);
   }
   if (j.state === "invalid") return replyForDraftPreview(j);
   return reply("I couldn't add the test. Nothing was changed.", undefined, true);
@@ -379,6 +386,13 @@ export function replyForDraftRemoved(j) {
     "bad-file": "That doesn't look like the name of a test.",
   }[j.state] ?? "I couldn't remove it. Nothing was changed.";
   return reply(plain, undefined, !["removed", "already-gone"].includes(j.state));
+}
+
+// A code that no longer works (too old, replaced, or the content changed). The person is told plainly; the assistant is told
+// what to do: show a fresh preview and wait for a reply, never preview and save in the same step.
+export function replyForStaleCode(what, previewTool, reason) {
+  return reply(`That preview of the ${what} is out of date, so I need to show it to you again before anything happens.`,
+    `${reason ?? "The code no longer works."} Call ${previewTool} again, show the person the new preview, and STOP: wait for their reply before the save step. Never preview and save in the same step.`, true);
 }
 
 // ---------- sending a change for review ----------

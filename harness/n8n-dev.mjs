@@ -8,7 +8,7 @@
 //   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
 //   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
 //   n8n-dev tests-fix <workflow-dir> [--apply] [--from-report f]  update tests that fail only because they expect the wording just changed (dry run unless --apply)
-//   n8n-dev test-add <workflow-dir> --spec <json> --words <text> [--apply]   check, and with --apply write, a new test built from a person's words (dry run unless --apply)
+//   n8n-dev test-add <workflow-dir> --spec <json> --words <text> [--apply]   check, and with --apply write, a test (or a set of up to 6, all or none) built from a person's words (dry run unless --apply)
 //   n8n-dev test-remove <workflow-dir> --file <name.yaml>       delete a test that test-add wrote, if nobody edited it since
 //   n8n-dev submit <workflow-dir> --branch n8n-dev/<name> --message <text>   send the workflow folder to a NEW branch of the team repository (never the shared branch)
 //   n8n-dev submit-facts <workflow-dir> [--fetch]                          what differs from the shared branch (read-only, JSON), for the submit checks
@@ -29,10 +29,10 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { buildPlan, describeOps, planToJson, decidePull } from "./pull.mjs";
-import { startVerdict, savedSince, describeSession, startRefusal, agePhrase } from "./session.mjs";
+import { startVerdict, savedSince, describeSession, startRefusal, agePhrase, editsConsumed } from "./session.mjs";
 import { findBash } from "./shell.mjs";
 import { makeRecord, addTestEdits, decideUndo, safeRelative, textHash } from "./backup.mjs";
-import { parseSpec, validateSpec, commentLine, nextTestFile, LIMITS as TEST_LIMITS } from "./testspec.mjs";
+import { parseSpecs, validateSpec, commentLine, nextTestFile, LIMITS as TEST_LIMITS } from "./testspec.mjs";
 import { planTestUpdates, rewriteTestText } from "./testfix.mjs";
 import { computePatch } from "./merge.mjs";
 
@@ -337,6 +337,17 @@ function openUi(wf) {
 // ---------- session: what an earlier editor left behind ----------
 const chamberCmd = (sub) => spawnSync(`bash ./scripts/n8n-chamber.sh ${sub}`, { shell: SHELL, cwd: ROOT, encoding: "utf8", env: { ...process.env, MSYS_NO_PATHCONV: "1" } });
 
+// When the editor's contents were last saved to disk (ms), and when a change was last applied (ms). Either may be null.
+function savedAtOf(manifest) {
+  if (!manifest || !safeRelative(manifest.exportDir ?? "")) return null;
+  const dir = path.resolve(ROOT, manifest.exportDir);
+  const times = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => fs.statSync(path.join(dir, f)).mtimeMs) : [];
+  return times.length ? Math.max(...times) : null;
+}
+function appliedAtMs() {
+  try { return Date.parse(JSON.parse(fs.readFileSync(UNDO_FILE, "utf8")).at) || null; } catch { return null; }
+}
+
 function sessionInfo() {
   // N8N_DEV_TEST_EDITOR_STATE lets the tests say what Docker would say, so they never depend on (or touch) a real editor.
   const editor = process.env.N8N_DEV_TEST_EDITOR_STATE || (chamberCmd("state").stdout || "").trim() || "unknown";
@@ -344,12 +355,8 @@ function sessionInfo() {
   try { manifest = JSON.parse(fs.readFileSync(path.join(WORK, "ui-manifest.json"), "utf8")); } catch { /* no session recorded */ }
   let savedAt = null, appliedAt = null, drift = null, changes = null;
   if (manifest) {
-    if (safeRelative(manifest.exportDir ?? "")) {
-      const dir = path.resolve(ROOT, manifest.exportDir);
-      const times = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => fs.statSync(path.join(dir, f)).mtimeMs) : [];
-      savedAt = times.length ? Math.max(...times) : null;
-    }
-    try { appliedAt = Date.parse(JSON.parse(fs.readFileSync(UNDO_FILE, "utf8")).at) || null; } catch { /* nothing applied */ }
+    savedAt = savedAtOf(manifest);
+    appliedAt = appliedAtMs();
     try { const plan = loadPlan(); if (!plan.error) { drift = plan.drift; changes = plan.ops.length; } } catch { /* unreadable: no details */ }
   }
   const info = describeSession({ editor, manifest, savedAt, appliedAt, drift, changes, now: Date.now() });
@@ -477,6 +484,12 @@ function runPull() {
     if (asJson) return out({ state: "wrong-workflow", expected: plan.manifest.workflowDir, given }, 2);
     console.error(`The last chamber session was for ${plan.manifest.workflowDir}, not ${given}.`);
     return 2;
+  }
+  // Edits that were already applied are used up: say so, the same way the session report does.
+  if (editsConsumed(savedAtOf(plan.manifest), appliedAtMs())) {
+    if (asJson) return out({ state: "already-applied", workflow: plan.manifest.workflowDir }, 0);
+    console.log("Those edits were already applied to " + plan.manifest.workflowFile + ", so there is nothing waiting.");
+    return 0;
   }
   const findings = scan(plan.merged);
   const decision = decidePull({ plan, apply: args.includes("--apply"), force: args.includes("--force"), findings });
@@ -607,28 +620,43 @@ const readDrafts = () => { try { const r = JSON.parse(fs.readFileSync(DRAFTS_FIL
 
 function runTestAdd(wf) {
   const out = (obj, code) => { console.log(JSON.stringify(obj)); return code; };
-  const parsed = parseSpec(flag("--spec"));
+  const parsed = parseSpecs(flag("--spec"));
   if (parsed.error) return out({ state: "invalid", errors: [parsed.error] }, 1);
   const words = commentLine(flag("--words"));
   if (!words) return out({ state: "invalid", errors: [{ code: "no-words" }] }, 1);
   const testDir = path.join(wfDir, "tests");
   const files = fs.existsSync(testDir) ? fs.readdirSync(testDir).filter((f) => /\.ya?ml$/.test(f)).sort() : [];
-  if (files.length >= TEST_LIMITS.tests) return out({ state: "invalid", errors: [{ code: "too-many-tests", max: TEST_LIMITS.tests }] }, 1);
-  const existingNames = files.map((f) => { try { return parseYaml(fs.readFileSync(path.join(testDir, f), "utf8"))?.test; } catch { return null; } }).filter(Boolean);
+  if (files.length + parsed.specs.length > TEST_LIMITS.tests) return out({ state: "invalid", errors: [{ code: "too-many-tests", max: TEST_LIMITS.tests }] }, 1);
+  const names = files.map((f) => { try { return parseYaml(fs.readFileSync(path.join(testDir, f), "utf8"))?.test; } catch { return null; } }).filter(Boolean);
   const steps = wf.nodes.map((n) => ({ name: n.name, outside: isOutside(n), trigger: isTrigger(n) }));
-  const v = validateSpec(parsed.spec, { steps, existingNames });
-  if (!v.ok) return out({ state: "invalid", errors: v.errors }, 1);
-  const file = nextTestFile(files, v.test.test);
-  const text = `# Written from the person's own words:\n# "${words}"\n${stringifyYaml(v.test)}`;
-  try { if (JSON.stringify(parseYaml(text)) !== JSON.stringify(v.test)) throw new Error("did not read back the same"); }
-  catch (e) { return out({ state: "failed", message: "The test would not be written correctly: " + e.message }, 1); }
-  const facts = { workflow: rel(wfDir), file, name: v.test.test, when: { trigger: v.test.trigger, services: v.test.mocks ?? {} }, then: parsed.spec.then, unmocked: v.unmocked };
+  // Every test in the set is checked, and a name may not repeat within the set either. If any one is wrong, none is written.
+  const taken = [...files], planned = [], errors = [];
+  parsed.specs.forEach((spec, index) => {
+    const v = validateSpec(spec, { steps, existingNames: names });
+    if (!v.ok) { errors.push(...v.errors.map((e) => ({ ...e, index, testName: typeof spec?.name === "string" ? spec.name : null }))); return; }
+    names.push(v.test.test);
+    const file = nextTestFile(taken, v.test.test);
+    taken.push(file);
+    planned.push({ file, v, then: spec.then, text: `# Written from the person's own words:\n# "${words}"\n${stringifyYaml(v.test)}` });
+  });
+  if (errors.length) return out({ state: "invalid", count: parsed.specs.length, errors }, 1);
+  for (const p of planned) {
+    try { if (JSON.stringify(parseYaml(p.text)) !== JSON.stringify(p.v.test)) throw new Error("did not read back the same"); }
+    catch (e) { return out({ state: "failed", message: "A test would not be written correctly: " + e.message }, 1); }
+  }
+  const tests = planned.map((p) => ({ file: p.file, name: p.v.test.test, when: { trigger: p.v.test.trigger, services: p.v.test.mocks ?? {} }, then: p.then, unmocked: p.v.unmocked }));
+  const facts = { workflow: rel(wfDir), tests };
   if (!args.includes("--apply")) return out({ state: "ready", ...facts }, 0);
+  const written = [];
   try {
-    fs.writeFileSync(path.join(testDir, file), text, { flag: "wx" });                       // never overwrites anything
+    for (const p of planned) { fs.writeFileSync(path.join(testDir, p.file), p.text, { flag: "wx" }); written.push(p.file); }   // never overwrites anything
     fs.mkdirSync(WORK, { recursive: true });
-    fs.writeFileSync(DRAFTS_FILE, JSON.stringify([...readDrafts(), { workflow: rel(wfDir), file: `${rel(wfDir)}/tests/${file}`, name: v.test.test, hash: textHash(text), words, at: new Date().toISOString() }].slice(-200), null, 2));
-  } catch (e) { return out({ state: "failed", message: e.message }, 1); }
+    const at = new Date().toISOString();
+    fs.writeFileSync(DRAFTS_FILE, JSON.stringify([...readDrafts(), ...planned.map((p) => ({ workflow: rel(wfDir), file: `${rel(wfDir)}/tests/${p.file}`, name: p.v.test.test, hash: textHash(p.text), words, at }))].slice(-200), null, 2));
+  } catch (e) {
+    for (const f of written) fs.rmSync(path.join(testDir, f), { force: true });                   // all or none
+    return out({ state: "failed", message: e.message }, 1);
+  }
   return out({ state: "added", ...facts }, 0);
 }
 

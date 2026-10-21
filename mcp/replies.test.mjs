@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JARGON, describeChanges, describeNotApplied, plainAssertion,
-  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, describeOffer, describeWhenThen, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved, replyForPreview, replyForApply, replyForStatus,
+  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, describeOffer, describeWhenThen, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved, replyForStaleCode, replyForPreview, replyForApply, replyForStatus,
 } from "./replies.mjs";
 
 // The part of a reply meant for the person: without the line for the assistant and the support details.
@@ -221,10 +221,15 @@ const everyReply = () => {
   }
   for (const j of [{ state: "resumed", address: "http://127.0.0.1:5678", login: { email: "a@b.c", password: "p" } }, { state: "drifted", session: left }, { state: "nothing-to-resume" }, { state: "failed", details: "docker: boom" }]) out.push(replyForResume(j));
   for (const j of [{ state: "discarded", cleaned: true }, { state: "discarded", cleaned: false }, { state: "no-words" }, { state: "failed" }]) out.push(replyForDiscard(j));
-  const draft = { state: "ready", name: "Down site", when: { trigger: { site: "docs", n: 2 }, services: { "Check status": [{ status: "down" }] } }, then: [{ step: "Send alert", runs: 1 }, { step: "Ignore", doesNotRun: true }, { step: "Compose", field: "text", contains: "y" }, { endsAt: "Send alert" }], unmocked: ["Send alert"] };
-  out.push(replyForDraftPreview(draft, "1", "When a site is down, alert."), replyForDraftPreview({ ...draft, unmocked: [] }, "1", "w"), replyForDraftPreview({ state: "nope" }));
+  const draftTest = { name: "Down site", when: { trigger: { site: "docs", n: 2 }, services: { "Check status": [{ status: "down" }] } }, then: [{ step: "Send alert", runs: 1 }, { step: "Ignore", doesNotRun: true }, { step: "Compose", field: "text", contains: "y" }, { endsAt: "Send alert" }], unmocked: ["Send alert"] };
+  const draft = { state: "ready", tests: [draftTest] };
+  out.push(replyForDraftPreview({ state: "ready", tests: [draftTest, { ...draftTest, name: "Second" }] }, "1", "two tests please"), replyForDraftPreview({ state: "invalid", count: 2, errors: [{ code: "unknown-step", step: "Y", steps: ["A"], index: 1, testName: "Second" }] }));
+  out.push(replyForDraftPreview(draft, "1", "When a site is down, alert."), replyForDraftPreview({ ...draft, tests: [{ ...draftTest, unmocked: [] }] }, "1", "w"), replyForDraftPreview({ state: "nope" }));
   for (const code of ["bad-name", "name-taken", "unknown-step", "not-outside", "empty-then", "too-many-checks", "duplicate-check", "step-name-unsupported", "too-many-tests", "no-words", "bad-json"]) out.push(replyForDraftPreview({ state: "invalid", errors: [{ code, name: "X", step: "Y", steps: ["A"], outside: ["A"], max: 3 }] }));
-  out.push(replyForDraftRefused("too-soon"), replyForDraftRefused("no-words"), replyForDraftSaved({ state: "added", name: "Down site" }), replyForDraftSaved({ state: "failed" }));
+  out.push(replyForStaleCode("changes", "pull_preview", "That code has expired."), replyForStaleCode("test", "draft_test_preview"), replyForStaleCode("sending", "submit_preview", "x"), replyForPreview({ state: "already-applied" }));
+  out.push(replyForDraftSaved({ state: "added", tests: [{ name: "A", file: "02-a.yaml" }, { name: "B", file: "03-b.yaml" }] }));
+  for (const code of ["too-many-in-preview"]) out.push(replyForDraftPreview({ state: "invalid", count: 2, errors: [{ code, max: 6, index: 0, testName: "T" }] }));
+  out.push(replyForDraftRefused("too-soon"), replyForDraftRefused("no-words"), replyForDraftSaved({ state: "added", tests: [{ name: "Down site", file: "04-x.yaml" }] }), replyForDraftSaved({ state: "failed" }));
   for (const state of ["removed", "already-gone", "not-drafted", "changed-since", "bad-file", "other"]) out.push(replyForDraftRemoved({ state, file: "04-x.yaml", name: "Down site" }));
   out.push(replyForSend({ state: "sent" }, "https://github.com/acme/flows/pull/new/n8n-dev/demo-20261018-0705"), replyForSend({ state: "sent" }, null));
   for (const state of ["nothing", "push-failed", "no-identity", "no-remote", "no-git", "no-repo", "no-base", "failed", "bad-branch"]) out.push(replyForSend({ state, details: "fatal: could not read Username" }, null));
@@ -442,12 +447,13 @@ test("bringing an editor back, and throwing one away, are said plainly", () => {
 });
 
 // ---------- tests written from the person's own words ----------
-const DRAFT = { state: "ready", name: "Down site", when: { trigger: { site: "docs", n: 2, ok: true, nested: { a: 1 } }, services: { "Check status": [{ status: "down", latency_ms: 1200 }, { status: "up" }] } },
+const DRAFT_TEST = { name: "Down site", when: { trigger: { site: "docs", n: 2, ok: true, nested: { a: 1 } }, services: { "Check status": [{ status: "down", latency_ms: 1200 }, { status: "up" }] } },
   then: [{ step: "Send alert", runs: 1 }, { step: "Send alert", runs: 3 }, { step: "Ignore", doesNotRun: true }, { step: "Compose", field: "reminder_count", side: "output", is: 3 },
     { step: "Compose", field: "text", isNot: "x" }, { step: "Compose", field: "a.b", contains: "y" }, { endsAt: "Send alert" }], unmocked: ["Send alert"] };
+const DRAFT = { state: "ready", tests: [DRAFT_TEST] };
 
 test("a test is described in plain when/then sentences for every kind of check", () => {
-  const { when, then } = describeWhenThen(DRAFT);
+  const { when, then } = describeWhenThen(DRAFT_TEST);
   assert.equal(when[0], "A request comes in with site = “docs”, n = 2, ok = true, nested = {\"a\":1}");
   assert.equal(when[1], "“Check status” answers with status = “down”, latency ms = 1200, and then with status = “up”");
   assert.deepEqual(then, [
@@ -470,7 +476,7 @@ test("the preview keeps the code for the assistant and the person's words in fro
   assert.match(forPerson(r.text), /Nothing has been added yet/);
   assert.doesNotMatch(forPerson(r.text), /737373|draft_test_save/);
   assert.match(r.text, /For you, the assistant.*737373.*STOP.*draft_test_save.*theirWords/s);
-  assert.doesNotMatch(replyForDraftPreview({ ...DRAFT, unmocked: [] }, "1", "w").text, /no pretend answer/);
+  assert.doesNotMatch(replyForDraftPreview({ ...DRAFT, tests: [{ ...DRAFT_TEST, unmocked: [] }] }, "1", "w").text, /no pretend answer/);
 });
 
 test("every way a described test can be refused has a plain sentence, and the format for the assistant", () => {
@@ -485,13 +491,13 @@ test("every way a described test can be refused has a plain sentence, and the fo
     assert.ok(forPerson(r.text).length > 40, e.code);
     assert.match(r.text, /For you, the assistant.*"then"/s, e.code);
   }
-  assert.match(replyForDraftPreview({ state: "invalid", errors: [{ code: "bad-json" }, { code: "bad-trigger" }] }).text, /adjust how I've described that test/);
+  assert.match(replyForDraftPreview({ state: "invalid", errors: [{ code: "bad-json" }, { code: "bad-trigger" }] }).text, /adjust how I've described the test/);
   assert.equal(replyForDraftPreview({ state: "nope" }).isError, true);
 });
 
 test("saving, refusing and removing are said plainly", () => {
-  assert.match(replyForDraftSaved({ state: "added", name: "Down site" }).text, /Added the test “Down site”.*fail until your workflow does this/s);
-  assert.match(replyForDraftSaved({ state: "added", name: "Down site" }).text, /For you, the assistant.*ui_start/s);
+  assert.match(replyForDraftSaved({ state: "added", tests: [{ name: "Down site", file: "04-x.yaml" }] }).text, /Added the test “Down site”.*fail until your workflow does this/s);
+  assert.match(replyForDraftSaved({ state: "added", tests: [{ name: "Down site", file: "04-x.yaml" }] }).text, /For you, the assistant.*ui_start/s);
   assert.match(replyForDraftSaved({ state: "invalid", errors: [{ code: "name-taken", name: "X" }] }).text, /already a test called/);
   assert.equal(replyForDraftSaved({ state: "failed" }).isError, true);
   assert.match(forPerson(replyForDraftRefused("too-soon").text), /go-ahead first/);
@@ -499,4 +505,54 @@ test("saving, refusing and removing are said plainly", () => {
   for (const [state, isError] of [["removed", false], ["already-gone", false], ["not-drafted", true], ["changed-since", true], ["bad-file", true], ["other", true]]) {
     assert.equal(replyForDraftRemoved({ state, file: "04-x.yaml", name: "Down site" }).isError, isError, state);
   }
+});
+
+// ---------- several tests at once, stale codes, edits already applied ----------
+const TWO = { state: "ready", tests: [DRAFT_TEST, { ...DRAFT_TEST, name: "Second test", unmocked: [] }] };
+
+test("several tests are shown one after the other, with one question for the whole set", () => {
+  const r = replyForDraftPreview(TWO, "818181", "Slow sites should alert; just under the line should not.");
+  assert.match(forPerson(r.text), /Here are the 2 tests I would add/);
+  assert.match(forPerson(r.text), /Test 1: “Down site”/);
+  assert.match(forPerson(r.text), /Test 2: “Second test”/);
+  assert.match(forPerson(r.text), /In test 1, these steps talk to outside services/);
+  assert.doesNotMatch(forPerson(r.text), /In test 2, these steps/, "only the test that needs an answer is flagged");
+  assert.match(forPerson(r.text), /I'll add them all/);
+  assert.doesNotMatch(forPerson(r.text), /818181/);
+  assert.match(r.text, /For you, the assistant.*with the WHOLE set.*never preview and save in the same step/s);
+  assert.match(replyForDraftPreview({ state: "ready", tests: [DRAFT_TEST] }, "1", "w").text, /Here is the test I would add/);
+});
+
+test("problems in a set name the test they belong to", () => {
+  const r = replyForDraftPreview({ state: "invalid", count: 3, errors: [{ code: "unknown-step", step: "Y", steps: ["A"], index: 2, testName: "Third" }, { code: "name-taken", name: "X", index: 0, testName: null }] });
+  assert.match(forPerson(r.text), /can't add those tests yet/);
+  assert.match(forPerson(r.text), /Test 3 \(“Third”\): There is no step called “Y”/);
+  assert.match(forPerson(r.text), /Test 1: There is already a test called “X”/);
+  const single = replyForDraftPreview({ state: "invalid", count: 1, errors: [{ code: "unknown-step", step: "Y", steps: ["A"], index: 0, testName: "Only" }] });
+  assert.doesNotMatch(forPerson(single.text), /Test 1/, "a single test is not numbered");
+  assert.match(forPerson(replyForDraftPreview({ state: "invalid", errors: [{ code: "too-many-in-preview", max: 6 }] }).text), /more than 6 tests at once/);
+});
+
+test("a saved set lists every test, and a single test keeps the short wording", () => {
+  const r = replyForDraftSaved({ state: "added", tests: [{ name: "One", file: "02-one.yaml" }, { name: "Two", file: "03-two.yaml" }] });
+  assert.match(forPerson(r.text), /Added 2 tests:/);
+  assert.match(forPerson(r.text), /“One”/);
+  assert.match(forPerson(r.text), /“Two”/);
+  assert.match(r.text, /For you, the assistant.*02-one\.yaml, 03-two\.yaml/s);
+  assert.match(forPerson(replyForDraftSaved({ state: "added", tests: [{ name: "Solo", file: "02-solo.yaml" }] }).text), /^Added the test “Solo”\./);
+});
+
+test("an old or replaced preview is explained to the person plainly, and to the assistant firmly", () => {
+  const r = replyForStaleCode("changes", "pull_preview", "That code has expired. Preview again to get a new one.");
+  assert.equal(r.isError, true);
+  assert.match(forPerson(r.text), /That preview of the changes is out of date, so I need to show it to you again before anything happens\./);
+  assert.doesNotMatch(forPerson(r.text), /expired|pull_preview/);
+  assert.match(r.text, /For you, the assistant.*expired.*Call pull_preview again.*STOP.*Never preview and save in the same step/s);
+  assert.match(replyForStaleCode("test", "draft_test_preview", undefined).text, /The code no longer works/);
+});
+
+test("edits that were already applied are said plainly, and are not an error", () => {
+  const r = replyForPreview({ state: "already-applied", workflow: "flows/demo" });
+  assert.equal(r.isError, false);
+  assert.match(r.text, /already applied to your workflow, so there is nothing waiting/);
 });

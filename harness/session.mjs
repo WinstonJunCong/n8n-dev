@@ -35,6 +35,10 @@ export function agePhrase(ms) {
   return `${Math.floor(ms / (24 * HOUR_MS))} days ago`;
 }
 
+// Edits saved at `savedAt` are used up once a change was applied at or after that time. `pull` and the session report both use
+// this, so they can never disagree about whether something is still waiting.
+export const editsConsumed = (savedAt, appliedAt) => savedAt !== null && savedAt !== undefined && appliedAt !== null && appliedAt !== undefined && appliedAt >= savedAt;
+
 // Works out what an earlier session left behind. Nothing here touches Docker or the disk.
 //   editor    "running" | "stopped" | "none" | "unknown" (Docker is not running)
 //   manifest  what `ui` recorded for the session ({ workflowDir, createdAt }), or null
@@ -52,7 +56,7 @@ export function describeSession({ editor, manifest, savedAt, appliedAt, drift, c
     const ageMs = Number.isFinite(since) ? now - since : null;
     return { kind: editor === "running" ? "editor-running" : "editor-stopped", ...base, ageMs, stale: ageMs !== null && ageMs > STALE_MS };
   }
-  const pending = manifest && savedAt !== null && (changes ?? 0) > 0 && !(appliedAt !== null && appliedAt >= savedAt);
+  const pending = manifest && savedAt !== null && (changes ?? 0) > 0 && !editsConsumed(savedAt, appliedAt);
   if (pending) {
     const ageMs = now - savedAt;
     return { kind: "saved-edits", ...base, ageMs, stale: ageMs > STALE_MS };

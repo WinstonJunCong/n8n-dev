@@ -132,3 +132,16 @@ test("after a discard, the saved edits are no longer offered", () => {
   cli(dir, "none", "ui-discard", "--json");
   assert.equal(session(dir).kind, "none");
 });
+
+test("pull and status agree: once the edits are applied pull says so, and after an undo they are waiting again", () => {
+  const dir = makeRepo();
+  assert.equal(cli(dir, "none", "pull", "flows/demo", "--json").json.state, "ready");
+  assert.equal(cli(dir, "none", "pull", "flows/demo", "--apply", "--json").json.state, "applied");
+  const again = cli(dir, "none", "pull", "flows/demo", "--json");
+  assert.deepEqual([again.status, again.json.state, again.json.workflow], [0, "already-applied", "flows/demo"]);
+  assert.equal(cli(dir, "none", "pull", "flows/demo", "--apply", "--json").json.state, "already-applied", "and applying again changes nothing");
+  assert.equal(session(dir).kind, "none", "the session report says the same");
+  assert.equal(cli(dir, "none", "undo", "--json").json.state, "restored");
+  assert.equal(cli(dir, "none", "pull", "flows/demo", "--json").json.state, "ready", "control: after undo they are waiting again");
+  assert.equal(session(dir).kind, "saved-edits");
+});

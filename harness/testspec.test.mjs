@@ -2,7 +2,7 @@
 // Run with: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSpec, validateSpec, commentLine, nextTestFile, specHash, LIMITS } from "./testspec.mjs";
+import { parseSpec, parseSpecs, validateSpec, commentLine, nextTestFile, specHash, LIMITS } from "./testspec.mjs";
 
 const STEPS = [
   { name: "Incoming", outside: false, trigger: true },
@@ -163,4 +163,16 @@ test("the same description and words always give the same fingerprint, and any c
   const other = GOOD(); other.then[0].runs = 2;
   assert.notEqual(specHash(GOOD(), "words"), specHash(other, "words"));
   assert.notEqual(specHash(GOOD(), "words"), specHash(GOOD(), "other words"));
+});
+
+test("a request can be one test or a small list of them, and anything else is refused", () => {
+  const one = { name: "One test" }, two = { name: "Two test" };
+  assert.deepEqual(parseSpecs(JSON.stringify(one)).specs, [one]);
+  assert.deepEqual(parseSpecs(JSON.stringify([one, two])).specs, [one, two]);
+  for (const bad of ["", "   ", "{nope", "[]", "5", "null", '"text"', "[1]", '[{"a":1}, "x"]', "[[{}]]", undefined, 5]) assert.equal(parseSpecs(bad).error?.code, "bad-json", String(bad));
+  const six = Array.from({ length: LIMITS.testsPerPreview }, (_, i) => ({ name: `T${i}` }));
+  assert.equal(parseSpecs(JSON.stringify(six)).specs.length, LIMITS.testsPerPreview);
+  assert.equal(parseSpecs(JSON.stringify([...six, one])).error.code, "too-many-in-preview");
+  assert.equal(parseSpecs(JSON.stringify([{ name: "x".repeat(LIMITS.specChars) }])).error.code, "too-big");
+  assert.equal(LIMITS.testsPerPreview, 6);
 });
