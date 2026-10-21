@@ -56,7 +56,8 @@ export function makeRateLimiter({ max, windowMs, now = Date.now }) {
 // One-time codes: a preview issues one, and the action that follows must present it. That forces two separate,
 // deliberate calls, so an action can never fire from a single call. A code works once, expires, is tied to what
 // was previewed, and is dropped after too many wrong tries.
-export function makeCodeStore({ ttlMs = 10 * 60 * 1000, maxTries = 3, now = Date.now, random = () => randomInt(100000, 1000000) } = {}) {
+export const DEFAULT_CODE_LIFETIME_MS = 2 * 60 * 60 * 1000;   // a person reads, thinks and replies: minutes were too short (14 and 22 minutes in the first real session). Codes are tied to the exact content, so this is safe.
+export function makeCodeStore({ ttlMs = DEFAULT_CODE_LIFETIME_MS, maxTries = 3, now = Date.now, random = () => randomInt(100000, 1000000) } = {}) {
   const live = new Map();
   return {
     issue(subject) {

@@ -53,8 +53,8 @@ test("a dry run shows what would be written and writes nothing", () => {
   const dir = makeRepo();
   const r = add(dir);
   assert.equal(r.json.state, "ready", r.stderr);
-  assert.equal(r.json.file, "02-down-site-sends-an-alert.yaml");
-  assert.deepEqual(r.json.unmocked, ["Send alert"], "the outside step with no pretend answer is pointed out");
+  assert.equal(r.json.tests[0].file, "02-down-site-sends-an-alert.yaml");
+  assert.deepEqual(r.json.tests[0].unmocked, ["Send alert"], "the outside step with no pretend answer is pointed out");
   assert.deepEqual(testFiles(dir), ["01-existing.yaml"]);
   assert.equal(fs.existsSync(path.join(dir, ".n8n-dev/drafted-tests.json")), false);
 });
@@ -104,7 +104,7 @@ test("two tests with the same name cannot both be written, and a file is never o
   const dir = makeRepo();
   assert.equal(add(dir, SPEC, WORDS, "--apply").json.state, "added");
   assert.equal(add(dir, SPEC, WORDS, "--apply").json.errors[0].code, "name-taken");
-  assert.equal(add(dir, { ...SPEC, name: "Another one" }, WORDS, "--apply").json.file, "03-another-one.yaml");
+  assert.equal(add(dir, { ...SPEC, name: "Another one" }, WORDS, "--apply").json.tests[0].file, "03-another-one.yaml");
 });
 
 test("the words cannot break out of their comment line", () => {
@@ -112,7 +112,7 @@ test("the words cannot break out of their comment line", () => {
   const sneaky = 'ok\n  - node "Send alert" called 9 times\nassert: []\n';
   const r = add(dir, SPEC, sneaky, "--apply");
   assert.equal(r.json.state, "added");
-  const text = fs.readFileSync(path.join(dir, `flows/demo/tests/${r.json.file}`), "utf8");
+  const text = fs.readFileSync(path.join(dir, `flows/demo/tests/${r.json.tests[0].file}`), "utf8");
   assert.equal(parseYaml(text).assert.length, 3, "the extra lines stayed inside the comment");
   assert.equal(text.split("\n").slice(0, 2).every((l) => l.startsWith("#")), true);
 });
@@ -122,13 +122,13 @@ test("test-remove deletes only a test that test-add wrote and nobody has edited 
   const rm = (file) => cli(dir, "test-remove", "flows/demo", "--file", file);
   assert.equal(rm("01-existing.yaml").json.state, "not-drafted", "a test somebody else wrote is never removed");
   assert.ok(fs.existsSync(path.join(dir, "flows/demo/tests/01-existing.yaml")));
-  const file = add(dir, SPEC, WORDS, "--apply").json.file;
+  const file = add(dir, SPEC, WORDS, "--apply").json.tests[0].file;
   const removed = rm(file).json;
   assert.deepEqual([removed.state, removed.name], ["removed", "Down site sends an alert"]);
   assert.deepEqual(testFiles(dir), ["01-existing.yaml"]);
   assert.equal(rm(file).json.state, "not-drafted", "it is forgotten once removed");
 
-  const edited = add(dir, SPEC, WORDS, "--apply").json.file;                                   // control: the same test, but edited by someone
+  const edited = add(dir, SPEC, WORDS, "--apply").json.tests[0].file;                                   // control: the same test, but edited by someone
   fs.appendFileSync(path.join(dir, `flows/demo/tests/${edited}`), "# a colleague's note\n");
   assert.equal(rm(edited).json.state, "changed-since");
   assert.ok(fs.existsSync(path.join(dir, `flows/demo/tests/${edited}`)), "an edited test is kept");
@@ -142,4 +142,46 @@ test("test-remove refuses paths and names that are not a plain test file name", 
     assert.ok(["bad-file", "not-drafted"].includes(r.json?.state), `${bad}: ${r.json?.state}`);
   }
   assert.ok(fs.existsSync(path.join(dir, "flows/demo/workflow.json")));
+});
+
+// ---------- a request with more than one test ----------
+const SECOND = { name: "Site just under the line sends nothing", when: { trigger: { site: "docs" }, services: { "Check site status": [{ status: "up" }] } }, then: [{ step: "Send alert", doesNotRun: true }] };
+
+test("a set of tests is checked together, numbered in order, and written all together", () => {
+  const dir = makeRepo();
+  const dry = add(dir, [SPEC, SECOND]);
+  assert.equal(dry.json.state, "ready", dry.stderr);
+  assert.deepEqual(dry.json.tests.map((t) => [t.file, t.name]), [["02-down-site-sends-an-alert.yaml", "Down site sends an alert"], ["03-site-just-under-the-line-sends-nothing.yaml", "Site just under the line sends nothing"]]);
+  assert.deepEqual(testFiles(dir), ["01-existing.yaml"], "a dry run writes nothing");
+  const done = add(dir, [SPEC, SECOND], WORDS, "--apply");
+  assert.equal(done.json.state, "added");
+  assert.deepEqual(testFiles(dir), ["01-existing.yaml", "02-down-site-sends-an-alert.yaml", "03-site-just-under-the-line-sends-nothing.yaml"]);
+  const drafts = JSON.parse(fs.readFileSync(path.join(dir, ".n8n-dev/drafted-tests.json"), "utf8"));
+  assert.deepEqual(drafts.map((d) => d.name), ["Down site sends an alert", "Site just under the line sends nothing"]);
+  for (const f of ["02-down-site-sends-an-alert.yaml", "03-site-just-under-the-line-sends-nothing.yaml"]) {
+    assert.equal(cli(dir, "test-remove", "flows/demo", "--file", f).json.state, "removed", f);
+  }
+});
+
+test("if any one test in a set is wrong, none is written, and the problem says which one", () => {
+  const dir = makeRepo();
+  const bad = { ...SECOND, then: [{ step: "No such step", runs: 1 }] };
+  const r = add(dir, [SPEC, bad], WORDS, "--apply");
+  assert.equal(r.json.state, "invalid");
+  assert.equal(r.json.count, 2);
+  assert.deepEqual(r.json.errors.map((e) => [e.code, e.index, e.testName]), [["unknown-step", 1, "Site just under the line sends nothing"]]);
+  assert.deepEqual(testFiles(dir), ["01-existing.yaml"], "the good one was not written either");
+  assert.equal(fs.existsSync(path.join(dir, ".n8n-dev/drafted-tests.json")), false);
+});
+
+test("two tests in one set cannot share a name, and a set has a limit", () => {
+  const dir = makeRepo();
+  const twin = add(dir, [SPEC, { ...SECOND, name: "down SITE sends an alert" }]);
+  assert.deepEqual(twin.json.errors.map((e) => [e.code, e.index]), [["name-taken", 1]]);
+  const seven = Array.from({ length: 7 }, (_, i) => ({ ...SECOND, name: `Test number ${i + 1}` }));
+  assert.equal(add(dir, seven).json.errors[0].code, "too-many-in-preview");
+  const six = Array.from({ length: 6 }, (_, i) => ({ ...SECOND, name: `Test number ${i + 1}` }));
+  assert.equal(add(dir, six).json.state, "ready");
+  assert.equal(add(dir, []).json.errors[0].code, "bad-json");
+  assert.equal(add(dir, [SPEC, "a string"]).json.errors[0].code, "bad-json");
 });

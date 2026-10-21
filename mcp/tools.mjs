@@ -3,7 +3,7 @@
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
 import { decideSubmit, branchName, commitMessage, compareUrl } from "./submit.mjs";
-import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForStatus, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved } from "./replies.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForStatus, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved, replyForStaleCode } from "./replies.mjs";
 
 const MINUTE = 60_000;
 export const MIN_OPEN_MS = 30_000;       // an editor the person has only just been given cannot be closed yet
@@ -234,7 +234,7 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
         const w = pick(a.value.workflow);
         if (w.error) return result(w.error, true);
         const redeemed = codes.redeem(a.value.code, `pull:${a.value.workflow}:${pullHash(w.dir)}`);
-        if (!redeemed.ok) return result(redeemed.reason, true);
+        if (!redeemed.ok) return plain(replyForStaleCode("changes", "pull_preview", redeemed.reason));
         const r = await run(["pull", w.dir, "--apply", "--json"], { okStatuses: [0, 1, 2] });
         const j = lastJson(r);
         if (!j) return result(unclear, true);
@@ -272,7 +272,7 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
         const w = pick(a.value.workflow);
         if (w.error) return result(w.error, true);
         const redeemed = codes.redeem(a.value.code, `tests:${a.value.workflow}:${testsHash(w.dir)}`);
-        if (!redeemed.ok) return result(redeemed.reason, true);
+        if (!redeemed.ok) return plain(replyForStaleCode("test updates", "explain_test_failures", redeemed.reason));
         const r = await run(["tests-fix", w.dir, "--apply", "--json"], { timeoutMs: 10 * MINUTE, okStatuses: [0, 1, 2] });
         const j = lastJson(r);
         if (!j) return result(unclear, true);
@@ -283,7 +283,7 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
     {
       name: "draft_test_preview",
       title: "Preview a test written from the person's words",
-      description: "Turn what the person says should happen into a test, and show it to them in plain when/then sentences before anything is written. It writes nothing. Put the person's own words, copied exactly, in theirWords: the test keeps them as a note so a reviewer sees what was asked for. Write the test only from what the person said, never from what the workflow currently does. spec is a JSON string: {\"name\":\"short name\",\"when\":{\"trigger\":{...the starting event's data...},\"services\":{\"<a step that talks to an outside service>\":[{...its pretend answer...}]}},\"then\":[{\"step\":\"S\",\"runs\":1},{\"step\":\"S\",\"doesNotRun\":true},{\"step\":\"S\",\"side\":\"input or output\",\"field\":\"a.b\",\"is or contains or isNot\":\"value\"},{\"endsAt\":\"S\"}]}. Step names must be exactly those in the workflow. It refuses with the reasons if the description does not fit. If it is ready it returns a one-time code. After showing the person the result, STOP and wait for them to reply before calling draft_test_save.",
+      description: "Turn what the person says should happen into a test, and show it to them in plain when/then sentences before anything is written. It writes nothing. Put the person's own words, copied exactly, in theirWords: the test keeps them as a note so a reviewer sees what was asked for. Write the test only from what the person said, never from what the workflow currently does. spec is a JSON string: {\"name\":\"short name\",\"when\":{\"trigger\":{...the starting event's data...},\"services\":{\"<a step that talks to an outside service>\":[{...its pretend answer...}]}},\"then\":[{\"step\":\"S\",\"runs\":1},{\"step\":\"S\",\"doesNotRun\":true},{\"step\":\"S\",\"side\":\"input or output\",\"field\":\"a.b\",\"is or contains or isNot\":\"value\"},{\"endsAt\":\"S\"}]}. Step names must be exactly those in the workflow. If the request needs more than one test, give a JSON list of such objects (up to 6) in ONE preview: the person confirms them all with one yes, and they are added all together or not at all. Never run previews in parallel: a newer preview replaces an older one. It refuses with the reasons if the description does not fit. If it is ready it returns a one-time code. After showing the person the result, STOP and wait for them to reply before calling draft_test_save.",
       inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" }, spec: { type: "string", description: "The test as a JSON string (see the tool description)" }, theirWords: { type: "string", description: "The person's own words describing what should happen, copied exactly" } }, required: ["workflow", "spec", "theirWords"], additionalProperties: false },
       annotations: { readOnlyHint: true, openWorldHint: false },
       async handler(args) {
@@ -317,10 +317,10 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
         const confirmation = a.value.theirWords.trim();
         if (!confirmation || confirmation.length > MAX_WORDS) return plain(replyForDraftRefused("no-words"));
         const draft = state.drafts[a.value.code];
-        if (!draft || draft.workflow !== a.value.workflow) return result("That code is not valid. Preview the test again to get a new one.", true);
+        if (!draft || draft.workflow !== a.value.workflow) return plain(replyForStaleCode("test", "draft_test_preview", "That code is not valid: it was never issued, or a newer preview replaced it."));
         if (now() - draft.shownAt < MIN_CONFIRM_MS) return plain(replyForDraftRefused("too-soon"));
         const redeemed = codes.redeem(a.value.code, `draft:${a.value.workflow}:${hashOf({ content: workflowHash(w.dir), spec: draft.spec, words: draft.words })}`);
-        if (!redeemed.ok) return result(redeemed.reason, true);
+        if (!redeemed.ok) return plain(replyForStaleCode("test", "draft_test_preview", redeemed.reason));
         delete state.drafts[a.value.code];
         const r = await run(["test-add", w.dir, "--spec", draft.spec, "--words", draft.words, "--apply"], { timeoutMs: MINUTE, okStatuses: [0, 1, 2] });
         const j = lastJson(r);
@@ -384,7 +384,7 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
         const g = await gatherSubmit(a.value.workflow, w.dir, a.value.reason);
         if (g.decision.state !== "ready") return plain(replyForSubmitPreview(g.decision, g.facts));      // everything is checked again, now
         const redeemed = codes.redeem(a.value.code, g.subject);
-        if (!redeemed.ok) return result(redeemed.reason, true);
+        if (!redeemed.ok) return plain(replyForStaleCode("sending", "submit_preview", redeemed.reason));
         const named = branchName(a.value.workflow, new Date(now()));
         if (named.error) return result(named.error, true);
         const message = commitMessage(a.value.workflow, g.decision);

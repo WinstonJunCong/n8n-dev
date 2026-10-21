@@ -40,7 +40,7 @@ const fakeRunner = (...answers) => {
 const build = ({ files = repo(), answers = [], clock = { t: 1_000_000 } } = {}) => {
   const fsx = fakeFs(files);
   const runner = fakeRunner(...answers);
-  const codes = makeCodeStore({ random: (() => { let n = 100000; return () => n++; })() });
+  const codes = makeCodeStore({ now: () => clock.t, random: (() => { let n = 100000; return () => n++; })() });
   const made = createTools({ fsx, runCli: runner.runCli, codes, now: () => clock.t });
   const byName = Object.fromEntries(made.tools.map((t) => [t.name, t]));
   return { ...made, byName, fsx, calls: runner.calls, codes, clock };
@@ -833,7 +833,8 @@ const DRAFT_SPEC = JSON.stringify({
   then: [{ step: "Send alert", runs: 1 }, { step: "Compose alert", field: "text", contains: "docs is not healthy" }, { endsAt: "Send alert" }],
 });
 const DRAFT_WORDS = "When a site is down, send an alert that says it is not healthy.";
-const DRAFT_FACTS = { workflow: "workflows/site-health-alert", file: "04-down-site-sends-an-alert.yaml", name: "Down site sends an alert", when: { trigger: { site: "docs" }, services: { "Check site status": [{ status: "down" }] } }, then: JSON.parse(DRAFT_SPEC).then, unmocked: ["Send alert"] };
+const DRAFT_TEST = { file: "04-down-site-sends-an-alert.yaml", name: "Down site sends an alert", when: { trigger: { site: "docs" }, services: { "Check site status": [{ status: "down" }] } }, then: JSON.parse(DRAFT_SPEC).then, unmocked: ["Send alert"] };
+const DRAFT_FACTS = { workflow: "workflows/site-health-alert", tests: [DRAFT_TEST] };
 const DRAFT_READY = say({ state: "ready", ...DRAFT_FACTS });
 const DRAFT_ADDED = say({ state: "added", ...DRAFT_FACTS });
 const draftPreview = (ctx, over = {}) => ctx.byName.draft_test_preview.handler({ workflow: "site-health-alert", spec: DRAFT_SPEC, theirWords: DRAFT_WORDS, ...over });
@@ -868,7 +869,7 @@ test("draft_test_preview says what is wrong in plain words and issues no code, e
   assert.match(r.text, /For you, the assistant.*draft_test_preview again/s);
   assert.match((await draftPreview(ctx)).text, /100000\b/, "the refusal did not create a code");
   const technical = await build({ answers: [say({ state: "invalid", errors: [{ code: "bad-json" }] }, 1)] }).byName.draft_test_preview.handler({ workflow: "site-health-alert", spec: "{", theirWords: DRAFT_WORDS });
-  assert.match(technical.text, /adjust how I've described that test/);
+  assert.match(technical.text, /adjust how I've described the test/);
 });
 
 test("draft_test_preview needs the person's own words and refuses odd arguments before running anything", async () => {
@@ -974,4 +975,101 @@ test("the three draft tools refuse bad workflow names without running anything",
     assert.equal((await ctx.byName.draft_test_remove.handler({ workflow, file: "01-x.yaml", theirWords: "yes" })).isError, true, workflow);
   }
   assert.equal(ctx.calls.length, 0);
+});
+
+// ---------- the drafting flow when the person is slow, or asks for several tests ----------
+const MIN = 60_000;
+const TEST_B = { file: "05-site-just-under-the-line-sends-nothing.yaml", name: "Site just under the line sends nothing", when: { trigger: { site: "docs" }, services: { "Check site status": [{ status: "up" }] } }, then: [{ step: "Send alert", doesNotRun: true }], unmocked: [] };
+const MANY_READY = say({ state: "ready", workflow: "workflows/site-health-alert", tests: [DRAFT_TEST, TEST_B] });
+const MANY_ADDED = say({ state: "added", workflow: "workflows/site-health-alert", tests: [DRAFT_TEST, TEST_B] });
+const MANY_SPEC = JSON.stringify([JSON.parse(DRAFT_SPEC), { name: TEST_B.name, when: TEST_B.when, then: TEST_B.then }]);
+
+test("a reply that takes a person 14 or 22 minutes (as in the first real session) still works", async () => {
+  for (const minutes of [14, 22, 90]) {
+    const ctx = build({ answers: [DRAFT_READY, DRAFT_ADDED] });
+    const code = await draftCode(ctx);
+    ctx.clock.t += minutes * MIN;
+    const r = await draftSave(ctx, code);
+    assert.equal(r.isError, false, `${minutes} minutes: ${r.text.slice(0, 80)}`);
+    assert.match(r.text, /Added the test/);
+  }
+});
+
+test("control: a preview left for three hours is out of date, and the assistant is told to show it again and wait", async () => {
+  const ctx = build({ answers: [DRAFT_READY, DRAFT_ADDED] });
+  const code = await draftCode(ctx);
+  ctx.clock.t += 3 * 60 * MIN;
+  const r = await draftSave(ctx, code);
+  assert.equal(r.isError, true);
+  assert.match(r.text, /That preview of the test is out of date, so I need to show it to you again/);
+  assert.match(r.text, /For you, the assistant.*expired.*draft_test_preview again.*STOP.*Never preview and save in the same step/s);
+  assert.equal(applyCalls(ctx).length, 0);
+});
+
+test("a request with several tests is previewed together, confirmed with one yes, and added together", async () => {
+  const ctx = build({ answers: [MANY_READY, MANY_ADDED] });
+  const r = await draftPreview(ctx, { spec: MANY_SPEC });
+  assert.match(r.text, /Here are the 2 tests I would add/);
+  assert.match(r.text, /Test 1: “Down site sends an alert”/);
+  assert.match(r.text, /Test 2: “Site just under the line sends nothing”/);
+  assert.match(r.text, /“Send alert” does not run/);
+  assert.match(r.text, /I'll add them all/);
+  assert.equal(r.text.match(/is (\d{6})/g).length, 1, "one code for the whole set");
+  const code = r.text.match(/is (\d{6})/)[1];
+  ctx.clock.t += MIN_CONFIRM_MS;
+  const saved = await draftSave(ctx, code);
+  assert.match(saved.text, /Added 2 tests:/);
+  assert.match(saved.text, /“Down site sends an alert”/);
+  assert.match(saved.text, /“Site just under the line sends nothing”/);
+  assert.match(saved.text, /For you, the assistant.*05-site-just-under-the-line-sends-nothing\.yaml/s);
+  assert.deepEqual(applyCalls(ctx)[0].args.slice(3, 4), [MANY_SPEC], "the whole set, exactly as previewed");
+});
+
+test("when one test in a set is wrong the reply says which, and nothing gets a code", async () => {
+  const bad = say({ state: "invalid", count: 2, errors: [{ code: "unknown-step", step: "Sned alert", steps: ["Send alert"], index: 1, testName: "Second one" }] }, 1);
+  const ctx = build({ answers: [bad, MANY_READY] });
+  const r = await draftPreview(ctx, { spec: MANY_SPEC });
+  assert.match(r.text, /can't add those tests yet/);
+  assert.match(r.text, /Test 2 \(“Second one”\): There is no step called “Sned alert”/);
+  assert.doesNotMatch(r.text, /is \d{6}/);
+  assert.match((await draftPreview(ctx, { spec: MANY_SPEC })).text, /100000\b/, "no code was created behind the scenes");
+});
+
+test("every two-step flow tells the assistant, in the same way, what to do with an old or replaced code", async () => {
+  const stale = (ctx) => ctx;
+  const cases = [
+    [() => build({ files: withSession(), answers: [PREVIEW_WITH_CHANGES] }), (ctx, code) => ctx.byName.pull_apply.handler({ workflow: "site-health-alert", code }), async (ctx) => (await ctx.byName.pull_preview.handler({ workflow: "site-health-alert" })).text.match(/code (\d{6})/)[1], "pull_preview", /preview of the changes/],
+    [() => build({ files: withApply(), answers: [FIX_READY] }), (ctx, code) => ctx.byName.update_tests.handler({ workflow: "site-health-alert", code }), explainThenCode, "explain_test_failures", /preview of the test updates/],
+    [() => build({ answers: [DRAFT_READY] }), (ctx, code) => draftSave(ctx, code), draftCode, "draft_test_preview", /preview of the test/],
+  ];
+  for (const [make, act, getCode, previewTool, wording] of cases) {
+    const ctx = make();
+    const code = await getCode(ctx);
+    ctx.clock.t += 3 * 60 * MIN;
+    const r = await act(ctx, code);
+    assert.equal(r.isError, true);
+    assert.match(r.text, wording);
+    assert.match(r.text, new RegExp(`${previewTool} again`));
+    assert.match(r.text, /Never preview and save in the same step/);
+  }
+  void stale;
+});
+
+test("pull_preview says plainly when the edits were already applied", async () => {
+  const ctx = build({ files: withSession(), answers: [say({ state: "already-applied", workflow: "workflows/site-health-alert" })] });
+  const r = await ctx.byName.pull_preview.handler({ workflow: "site-health-alert" });
+  assert.equal(r.isError, false);
+  assert.match(r.text, /already applied to your workflow, so there is nothing waiting/);
+  assert.doesNotMatch(r.text, /code \d{6}/);
+});
+
+test("an old preview of a change to send for review is explained the same way, and nothing is sent", async () => {
+  const ctx = sendContext();
+  const code = await previewCode(ctx);
+  ctx.clock.t += 3 * 60 * MIN;
+  const r = await submit(ctx, code);
+  assert.equal(r.isError, true);
+  assert.match(r.text, /That preview of the sending is out of date/);
+  assert.match(r.text, /submit_preview again.*Never preview and save in the same step/s);
+  assert.equal(sendCalls(ctx).length, 0, "nothing was sent");
 });

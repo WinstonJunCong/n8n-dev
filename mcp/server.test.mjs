@@ -80,6 +80,11 @@ describe("legacy era (initialize handshake)", () => {
     assert.ok(r.result.capabilities.tools);
     assert.equal(r.result.serverInfo.name, "n8n-dev");
     assert.match(r.result.instructions, /list_workflows/);
+    // lessons from the first real drafting session: one preview for the whole request, no parallel previews, recover from an old code by showing it again
+    assert.match(r.result.instructions, /single draft_test_preview, as a list/);
+    assert.match(r.result.instructions, /never run previews in parallel/);
+    assert.match(r.result.instructions, /never preview and save in the same step/);
+    assert.match(r.result.instructions, /A person may take hours to reply/);
     c.send({ method: "notifications/initialized" });
   });
 
