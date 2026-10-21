@@ -3,7 +3,7 @@
 // fakes, and a refused call can be proven never to have reached the command line.
 import { resolveWorkflow, pickPort, truncate, hashOf, strictArgs, isValidWorkflowName } from "./guards.mjs";
 import { decideSubmit, branchName, commitMessage, compareUrl } from "./submit.mjs";
-import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForStatus, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved, replyForStaleCode } from "./replies.mjs";
+import { replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForPreview, replyForApply, replyForUndo, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForStatus, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved, replyForStaleCode, replyForDescribe } from "./replies.mjs";
 
 const MINUTE = 60_000;
 export const MIN_OPEN_MS = 30_000;       // an editor the person has only just been given cannot be closed yet
@@ -281,9 +281,26 @@ export function createTools({ fsx, runCli, codes, now = Date.now }) {
       },
     },
     {
+      name: "describe_workflow",
+      title: "See how a workflow works",
+      description: "Show how one workflow works: its steps in the order a run reaches them, which of them talk to outside services (and so need a pretend answer in a test), the field names and example values the existing tests use for the starting event and for each pretend answer, and the existing tests in the form a new test is written in. It changes nothing. Call it BEFORE writing a test with draft_test_preview, and copy step names and field names from it exactly: never invent a field name. It tells the person, in plain words, what the workflow does and which tests it has.",
+      inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" } }, required: ["workflow"], additionalProperties: false },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      async handler(args) {
+        const a = strictArgs(args, { workflow: { type: "string", required: true } });
+        if (a.error) return result(a.error, true);
+        const w = pick(a.value.workflow);
+        if (w.error) return result(w.error, true);
+        const r = await run(["describe", w.dir], { timeoutMs: MINUTE, okStatuses: [0, 1, 2] });
+        const j = lastJson(r);
+        if (!j) return result(unclear, true);
+        return plain(replyForDescribe(j));
+      },
+    },
+    {
       name: "draft_test_preview",
       title: "Preview a test written from the person's words",
-      description: "Turn what the person says should happen into a test, and show it to them in plain when/then sentences before anything is written. It writes nothing. Put the person's own words, copied exactly, in theirWords: the test keeps them as a note so a reviewer sees what was asked for. Write the test only from what the person said, never from what the workflow currently does. spec is a JSON string: {\"name\":\"short name\",\"when\":{\"trigger\":{...the starting event's data...},\"services\":{\"<a step that talks to an outside service>\":[{...its pretend answer...}]}},\"then\":[{\"step\":\"S\",\"runs\":1},{\"step\":\"S\",\"doesNotRun\":true},{\"step\":\"S\",\"side\":\"input or output\",\"field\":\"a.b\",\"is or contains or isNot\":\"value\"},{\"endsAt\":\"S\"}]}. Step names must be exactly those in the workflow. If the request needs more than one test, give a JSON list of such objects (up to 6) in ONE preview: the person confirms them all with one yes, and they are added all together or not at all. Never run previews in parallel: a newer preview replaces an older one. It refuses with the reasons if the description does not fit. If it is ready it returns a one-time code. After showing the person the result, STOP and wait for them to reply before calling draft_test_save.",
+      description: "Turn what the person says should happen into a test, and show it to them in plain when/then sentences before anything is written. First call describe_workflow and copy the step names and field names from it. It writes nothing. Put the person's own words, copied exactly, in theirWords: the test keeps them as a note so a reviewer sees what was asked for. Write the test only from what the person said, never from what the workflow currently does. spec is a JSON string: {\"name\":\"short name\",\"when\":{\"trigger\":{...the starting event's data...},\"services\":{\"<a step that talks to an outside service>\":[{...its pretend answer...}]}},\"then\":[{\"step\":\"S\",\"runs\":1},{\"step\":\"S\",\"doesNotRun\":true},{\"step\":\"S\",\"side\":\"input or output\",\"field\":\"a.b\",\"is or contains or isNot\":\"value\"},{\"endsAt\":\"S\"}]}. Step names must be exactly those in the workflow. If the request needs more than one test, give a JSON list of such objects (up to 6) in ONE preview: the person confirms them all with one yes, and they are added all together or not at all. Never run previews in parallel: a newer preview replaces an older one. It refuses with the reasons if the description does not fit. If it is ready it returns a one-time code. After showing the person the result, STOP and wait for them to reply before calling draft_test_save.",
       inputSchema: { type: "object", properties: { workflow: { type: "string", description: "A name from list_workflows" }, spec: { type: "string", description: "The test as a JSON string (see the tool description)" }, theirWords: { type: "string", description: "The person's own words describing what should happen, copied exactly" } }, required: ["workflow", "spec", "theirWords"], additionalProperties: false },
       annotations: { readOnlyHint: true, openWorldHint: false },
       async handler(args) {

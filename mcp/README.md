@@ -33,6 +33,7 @@ It is a **thin, guarded wrapper over the same command line** you can run yoursel
 | `ui_start` | Opens the sealed editor with the faked tests loaded; returns the address and login |
 | `explain_test_failures` | After a change, finds tests that fail only because they expect the old wording and says so plainly; never touches any other failure |
 | `update_tests` | Updates just those tests, after the person confirms (one-time code); `undo_change` takes it back too |
+| `describe_workflow` | Shows how a workflow works (steps in order, which talk to outside services, the data the existing tests use, the tests) so tests are written from real names, never guessed; read-only |
 | `draft_test_preview` | Turns what the person says should happen into a test and shows it in plain when/then sentences; writes nothing |
 | `draft_test_save` | Adds the previewed test (one-time code and the person's own words); it fails until the workflow does what it says |
 | `draft_test_remove` | Takes back a test that `draft_test_save` added, if nobody edited it since |

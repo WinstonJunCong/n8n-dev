@@ -146,3 +146,41 @@ export function nextTestFile(existingFiles, name) {
   const slug = String(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/g, "") || "test";
   return `${String(top + 1).padStart(2, "0")}-${slug}.yaml`;
 }
+
+// ---------- reading existing tests back, so an assistant can copy their shape ----------
+const parseVal = (s) => { try { return JSON.parse(s); } catch { return String(s).trim(); } };
+
+// One check line from a test file, in the same form a description uses ({ step, runs } and so on). Anything that is not
+// one of the four phrases the test runner understands comes back as { raw }.
+export function parseAssertion(line) {
+  const text = String(line);
+  let m;
+  if ((m = text.match(/^node "(.+)" called (\d+) times?$/))) return { step: m[1], runs: Number(m[2]) };
+  if ((m = text.match(/^node "(.+)" not called$/))) return { step: m[1], doesNotRun: true };
+  if ((m = text.match(/^node "(.+)" (input|output)\.(\S+) (==|!=|contains) (.+)$/))) {
+    const key = { "==": "is", "!=": "isNot", contains: "contains" }[m[4]];
+    return { step: m[1], ...(m[2] === "output" ? { side: "output" } : {}), field: m[3], [key]: parseVal(m[5]) };
+  }
+  if ((m = text.match(/^workflow ends at "(.+)"$/))) return { endsAt: m[1] };
+  return { raw: text };
+}
+
+// The field names and an example value for each, taken from a list of data rows (the starting event or a pretend answer).
+export function fieldExamples(rows) {
+  const out = {};
+  for (const row of rows) {
+    if (!isObj(row)) continue;
+    for (const [k, v] of Object.entries(row)) if (!(k in out)) out[k] = v;
+  }
+  return out;
+}
+
+// A test file's contents, as the description an assistant would write to get the same test.
+export function describeTestObject(obj) {
+  if (!isObj(obj)) return null;
+  return {
+    name: typeof obj.test === "string" ? obj.test : null,
+    when: { trigger: isObj(obj.trigger) ? obj.trigger : {}, services: isObj(obj.mocks) ? obj.mocks : {} },
+    then: Array.isArray(obj.assert) ? obj.assert.map(parseAssertion) : [],
+  };
+}

@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = path.join(ROOT, "mcp", "server.mjs");
-const TOOLS = ["check_workflow", "draft_test_preview", "draft_test_remove", "draft_test_save", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit", "submit_preview", "ui_discard", "ui_resume", "ui_start", "ui_stop", "undo_change", "update_tests"];
+const TOOLS = ["check_workflow", "describe_workflow", "draft_test_preview", "draft_test_remove", "draft_test_save", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit", "submit_preview", "ui_discard", "ui_resume", "ui_start", "ui_stop", "undo_change", "update_tests"];
 
 // A minimal client: one server process, one JSON message per line each way.
 class Client {
@@ -85,6 +85,7 @@ describe("legacy era (initialize handshake)", () => {
     assert.match(r.result.instructions, /never run previews in parallel/);
     assert.match(r.result.instructions, /never preview and save in the same step/);
     assert.match(r.result.instructions, /A person may take hours to reply/);
+    assert.match(r.result.instructions, /call describe_workflow, and copy step names and field names from it exactly: never invent a field name/);
     c.send({ method: "notifications/initialized" });
   });
 

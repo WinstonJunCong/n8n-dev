@@ -185,3 +185,87 @@ test("two tests in one set cannot share a name, and a set has a limit", () => {
   assert.equal(add(dir, []).json.errors[0].code, "bad-json");
   assert.equal(add(dir, [SPEC, "a string"]).json.errors[0].code, "bad-json");
 });
+
+// ---------- describe: how the workflow looks, for an assistant about to write a test ----------
+const FLOW = {
+  name: "Site health",
+  nodes: [
+    { id: "n1", name: "Incoming", type: "n8n-nodes-base.webhook", typeVersion: 2, position: [0, 0], parameters: { path: "demo" } },
+    { id: "n2", name: "Check site status", type: "n8n-nodes-base.httpRequest", typeVersion: 4, position: [200, 0], parameters: {} },
+    { id: "n3", name: "Is it slow?", type: "n8n-nodes-base.if", typeVersion: 2, position: [400, 0], parameters: {} },
+    { id: "n4", name: "Compose alert", type: "n8n-nodes-base.noOp", typeVersion: 1, position: [600, -100], parameters: {} },
+    { id: "n6", name: "Send alert", type: "n8n-nodes-base.httpRequest", typeVersion: 4, position: [800, -100], parameters: {} },   // listed before "Ignore" in the file, but reached after it
+    { id: "n5", name: "Ignore", type: "n8n-nodes-base.noOp", typeVersion: 1, position: [600, 100], parameters: {} },
+    { id: "n7", name: "Left over", type: "n8n-nodes-base.noOp", typeVersion: 1, position: [0, 300], parameters: {} },
+  ],
+  connections: {
+    Incoming: { main: [[{ node: "Check site status", type: "main", index: 0 }]] },
+    "Check site status": { main: [[{ node: "Is it slow?", type: "main", index: 0 }]] },
+    "Is it slow?": { main: [[{ node: "Compose alert", type: "main", index: 0 }], [{ node: "Ignore", type: "main", index: 0 }]] },
+    "Compose alert": { main: [[{ node: "Send alert", type: "main", index: 0 }]] },
+  },
+};
+const describeRepo = (extraTests = {}) => {
+  const dir = makeRepo();
+  write(path.join(dir, "flows/demo/workflow.json"), JSON.stringify(FLOW, null, 2));
+  write(path.join(dir, "flows/demo/tests/01-existing.yaml"),
+    '# Written from the person\'s own words:\n# "x"\ntest: Slow site alerts\ntrigger:\n  site: docs\nmocks:\n  "Check site status":\n    - { status: slow, latency_ms: 6000 }\n  "Send alert":\n    - { ok: true }\nassert:\n  - node "Send alert" called 1 time\n  - node "Compose alert" output.text contains "slow"\n  - node "Ignore" not called\n  - workflow ends at "Send alert"\n');
+  write(path.join(dir, "flows/demo/tests/02-second.yaml"), 'test: Fast site is ignored\ntrigger:\n  site: api\n  extra: 1\nmocks:\n  "Check site status":\n    - { status: up, latency_ms: 80, region: eu }\nassert:\n  - node "Send alert" not called\n');
+  for (const [file, text] of Object.entries(extraTests)) write(path.join(dir, "flows/demo/tests", file), text);
+  return dir;
+};
+const describe = (dir) => cli(dir, "describe", "flows/demo");
+
+test("describe lists the steps in the order a run reaches them, says which talk to outside services, and puts unreached steps last", () => {
+  const r = describe(describeRepo());
+  assert.equal(r.json.state, "described", r.stderr);
+  assert.deepEqual(r.json.steps.map((s) => `${s.name}:${s.kind}`), [
+    "Incoming:start", "Check site status:outside", "Is it slow?:plain", "Compose alert:plain", "Ignore:plain", "Send alert:outside", "Left over:plain"]);
+  assert.equal(r.json.name, "Site health");
+});
+
+test("describe shows the data the existing tests use: field names with a first-seen example, for the start and for each outside step", () => {
+  const { data } = describe(describeRepo()).json;
+  assert.deepEqual(data.start, { site: "docs", extra: 1 });
+  assert.deepEqual(data.services, { "Check site status": { status: "slow", latency_ms: 6000, region: "eu" }, "Send alert": { ok: true } });
+});
+
+test("describe shows the existing tests in the form a description is written in", () => {
+  const { tests } = describe(describeRepo()).json;
+  assert.deepEqual(tests[0], {
+    file: "01-existing.yaml", name: "Slow site alerts",
+    when: { trigger: { site: "docs" }, services: { "Check site status": [{ status: "slow", latency_ms: 6000 }], "Send alert": [{ ok: true }] } },
+    then: [{ step: "Send alert", runs: 1 }, { step: "Compose alert", side: "output", field: "text", contains: "slow" }, { step: "Ignore", doesNotRun: true }, { endsAt: "Send alert" }],
+  });
+  assert.equal(tests.length, 2);
+});
+
+test("control: a described test, copied as a new test with a new name, is accepted by test-add", () => {
+  const dir = describeRepo();
+  const first = describe(dir).json.tests[0];
+  const copy = { name: "A copy of the slow test", when: first.when, then: first.then };
+  const r = add(dir, copy);
+  assert.equal(r.json.state, "ready", JSON.stringify(r.json.errors));
+  assert.equal(r.json.tests[0].name, "A copy of the slow test");
+});
+
+test("describe reports files it cannot read, clips long values, and caps the tests it lists", () => {
+  const many = Object.fromEntries(Array.from({ length: 14 }, (_, i) => [`${String(i + 3).padStart(2, "0")}-t.yaml`, `test: Extra ${i}\nassert:\n  - node "Send alert" called 1 time\n`]));
+  const dir = describeRepo({ ...many, "99-broken.yaml": "test: [unclosed", "98-long.yaml": `test: Long value\ntrigger:\n  note: ${"x".repeat(400)}\nassert:\n  - node "Send alert" called 1 time\n` });
+  const r = describe(dir).json;
+  assert.deepEqual(r.unreadable, ["99-broken.yaml"]);
+  assert.equal(r.tests.length, 12);
+  assert.equal(r.moreTests, 5, "17 readable tests, 12 listed");
+  assert.ok(r.data.start.note === undefined || r.data.start.note.length <= 160, "long values are clipped");
+  const longOne = describe(describeRepo({ "03-long.yaml": `test: Long value\ntrigger:\n  note: ${"y".repeat(400)}\nassert:\n  - node "Send alert" called 1 time\n` })).json;
+  assert.ok(longOne.data.start.note.length <= 160 && longOne.data.start.note.endsWith("…"));
+});
+
+test("describe changes nothing", () => {
+  const dir = describeRepo();
+  const snapshot = () => testFiles(dir).map((f) => fs.readFileSync(path.join(dir, "flows/demo/tests", f), "utf8")).join("|") + fs.readFileSync(path.join(dir, "flows/demo/workflow.json"), "utf8");
+  const before = snapshot();
+  describe(dir);
+  assert.equal(snapshot(), before);
+  assert.equal(fs.existsSync(path.join(dir, ".n8n-dev")), false, "it does not even create the working folder");
+});

@@ -8,6 +8,7 @@
 //   n8n-dev ui        <workflow-dir> --detach                   same, but returns at once and leaves it running (no terminal needed)
 //   n8n-dev ui-stop                                             save the edits from a detached chamber and remove it
 //   n8n-dev tests-fix <workflow-dir> [--apply] [--from-report f]  update tests that fail only because they expect the wording just changed (dry run unless --apply)
+//   n8n-dev describe <workflow-dir>                            read-only: the steps in order, which talk to outside services, the data the existing tests use, and the tests (JSON)
 //   n8n-dev test-add <workflow-dir> --spec <json> --words <text> [--apply]   check, and with --apply write, a test (or a set of up to 6, all or none) built from a person's words (dry run unless --apply)
 //   n8n-dev test-remove <workflow-dir> --file <name.yaml>       delete a test that test-add wrote, if nobody edited it since
 //   n8n-dev submit <workflow-dir> --branch n8n-dev/<name> --message <text>   send the workflow folder to a NEW branch of the team repository (never the shared branch)
@@ -32,7 +33,7 @@ import { buildPlan, describeOps, planToJson, decidePull } from "./pull.mjs";
 import { startVerdict, savedSince, describeSession, startRefusal, agePhrase, editsConsumed } from "./session.mjs";
 import { findBash } from "./shell.mjs";
 import { makeRecord, addTestEdits, decideUndo, safeRelative, textHash } from "./backup.mjs";
-import { parseSpecs, validateSpec, commentLine, nextTestFile, LIMITS as TEST_LIMITS } from "./testspec.mjs";
+import { parseSpecs, validateSpec, commentLine, nextTestFile, fieldExamples, describeTestObject, LIMITS as TEST_LIMITS } from "./testspec.mjs";
 import { planTestUpdates, rewriteTestText } from "./testfix.mjs";
 import { computePatch } from "./merge.mjs";
 
@@ -677,6 +678,43 @@ function runTestRemove() {
   return out({ state: "removed", file, name: record.name ?? null }, 0);
 }
 
+// ---------- describe: how a workflow and its tests look, for an assistant about to write a test ----------
+// Read-only. Shows the steps in the order a run reaches them, which ones talk to outside services (and so need a pretend
+// answer in a test), the field names and example values the existing tests use for the starting event and for each pretend
+// answer, and the existing tests themselves in the form a new test is written in. Nothing is changed or contacted.
+const clipValue = (v) => JSON.parse(JSON.stringify(v ?? null, (k, x) => (typeof x === "string" && x.length > 160 ? `${x.slice(0, 157)}…` : x)));
+function runDescribe(wf) {
+  const out = (obj, code) => { console.log(JSON.stringify(obj)); return code; };
+  const byName = new Map(wf.nodes.map((n) => [n.name, n]));
+  const order = [], seen = new Set();
+  const queue = wf.nodes.filter(isTrigger).map((n) => n.name);
+  while (queue.length) {
+    const name = queue.shift();
+    if (seen.has(name) || !byName.has(name)) continue;
+    seen.add(name); order.push(name);
+    for (const branch of wf.connections?.[name]?.main ?? []) for (const e of branch ?? []) queue.push(e.node);
+  }
+  for (const n of wf.nodes) if (!seen.has(n.name)) order.push(n.name);
+  const steps = order.map((name) => { const n = byName.get(name); return { name, kind: isTrigger(n) ? "start" : isOutside(n) ? "outside" : "plain" }; });
+
+  const testDir = path.join(wfDir, "tests");
+  const files = fs.existsSync(testDir) ? fs.readdirSync(testDir).filter((f) => /\.ya?ml$/.test(f)).sort() : [];
+  const tests = [], unreadable = [];
+  for (const file of files) {
+    try {
+      const d = describeTestObject(parseYaml(fs.readFileSync(path.join(testDir, file), "utf8")));
+      if (d) tests.push({ file, ...d }); else unreadable.push(file);
+    } catch { unreadable.push(file); }
+  }
+  const services = {};
+  for (const s of steps.filter((x) => x.kind === "outside")) {
+    const rows = tests.flatMap((t) => t.when.services[s.name] ?? []);
+    if (rows.length) services[s.name] = fieldExamples(rows);
+  }
+  const data = { start: fieldExamples(tests.map((t) => t.when.trigger)), services };
+  return out(clipValue({ state: "described", workflow: rel(wfDir), name: wf.name ?? null, steps, data, tests: tests.slice(0, 12), moreTests: Math.max(0, tests.length - 12), unreadable }), 0);
+}
+
 // ---------- submit-facts: what differs from the shared version, for the submit gates ----------
 // Read-only: compares this workflow's folder with the shared branch using only local Git data (no network). The MCP server
 // decides what is allowed from these facts (see mcp/submit.mjs); this command only reports.
@@ -820,8 +858,8 @@ if (cmd === "undo") process.exit(runUndo());
 if (cmd === "status") {   // is a sealed editor still open? Exit 0 = clean, 1 = something is there, 2 = could not tell
   process.exit(spawnSync("bash ./scripts/n8n-chamber.sh status", { shell: SHELL, cwd: ROOT, stdio: "inherit" }).status ?? 2);
 }
-if (!["scan", "structure", "test", "check", "ui", "tests-fix", "submit-facts", "submit", "test-add", "test-remove"].includes(cmd) || !wfDir) {
-  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix|submit-facts|submit|test-add|test-remove> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | ui-resume [--json] | ui-discard [--json] | session [--json] | undo [--json] | status");
+if (!["scan", "structure", "test", "check", "ui", "tests-fix", "submit-facts", "submit", "test-add", "test-remove", "describe"].includes(cmd) || !wfDir) {
+  console.log("usage: n8n-dev <scan|structure|test|check|ui|pull|tests-fix|submit-facts|submit|test-add|test-remove|describe> <workflow-dir> [--workflow-file file.json] [--report out.md] [--port 5678] [--detach] [--json]\n   or: n8n-dev ui-stop [--json] | ui-resume [--json] | ui-discard [--json] | session [--json] | undo [--json] | status");
   process.exit(2);
 }
 const wf = JSON.parse(fs.readFileSync(wfFile, "utf8"));
@@ -831,6 +869,7 @@ if (cmd === "submit-facts") process.exit(runSubmitFacts());
 if (cmd === "submit") process.exit(runSubmit());
 if (cmd === "test-add") process.exit(runTestAdd(wf));
 if (cmd === "test-remove") process.exit(runTestRemove());
+if (cmd === "describe") process.exit(runDescribe(wf));
 const s =["scan", "check"].includes(cmd) ? scan(wf) : null;
 const st = ["structure", "check"].includes(cmd) ? structure(wf) : null;
 const tests = ["test", "check"].includes(cmd) ? runTests(wf) : null;
