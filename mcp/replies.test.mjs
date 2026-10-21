@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   JARGON, describeChanges, describeNotApplied, plainAssertion,
-  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, describeOffer, describeWhenThen, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved, replyForStaleCode, replyForPreview, replyForApply, replyForStatus,
+  replyForCheck, replyForStart, replyForStop, replyForStopRefused, replyForUndo, describeUndone, replyForTestFix, replyForTestUpdate, replyForSubmitPreview, replyForSubmitRefused, replyForSend, replyForSession, replyForStartRefused, replyForResume, replyForDiscard, describeOffer, describeWhenThen, replyForDraftPreview, replyForDraftRefused, replyForDraftSaved, replyForDraftRemoved, replyForStaleCode, replyForDescribe, replyForPreview, replyForApply, replyForStatus,
 } from "./replies.mjs";
 
 // The part of a reply meant for the person: without the line for the assistant and the support details.
@@ -226,6 +226,7 @@ const everyReply = () => {
   out.push(replyForDraftPreview({ state: "ready", tests: [draftTest, { ...draftTest, name: "Second" }] }, "1", "two tests please"), replyForDraftPreview({ state: "invalid", count: 2, errors: [{ code: "unknown-step", step: "Y", steps: ["A"], index: 1, testName: "Second" }] }));
   out.push(replyForDraftPreview(draft, "1", "When a site is down, alert."), replyForDraftPreview({ ...draft, tests: [{ ...draftTest, unmocked: [] }] }, "1", "w"), replyForDraftPreview({ state: "nope" }));
   for (const code of ["bad-name", "name-taken", "unknown-step", "not-outside", "empty-then", "too-many-checks", "duplicate-check", "step-name-unsupported", "too-many-tests", "no-words", "bad-json"]) out.push(replyForDraftPreview({ state: "invalid", errors: [{ code, name: "X", step: "Y", steps: ["A"], outside: ["A"], max: 3 }] }));
+  out.push(replyForDescribe({ state: "described", workflow: "workflows/demo", name: "Demo flow", steps: [{ name: "Start", kind: "start" }, { name: "Ask", kind: "outside" }, { name: "Decide", kind: "plain" }], data: { start: { a: 1 }, services: {} }, tests: [{ file: "01.yaml", name: "First", when: {}, then: [] }], moreTests: 2, unreadable: [] }), replyForDescribe({ state: "described", workflow: "workflows/demo", name: null, steps: [], data: {}, tests: [], moreTests: 0, unreadable: [] }), replyForDescribe({ state: "nope" }));
   out.push(replyForStaleCode("changes", "pull_preview", "That code has expired."), replyForStaleCode("test", "draft_test_preview"), replyForStaleCode("sending", "submit_preview", "x"), replyForPreview({ state: "already-applied" }));
   out.push(replyForDraftSaved({ state: "added", tests: [{ name: "A", file: "02-a.yaml" }, { name: "B", file: "03-b.yaml" }] }));
   for (const code of ["too-many-in-preview"]) out.push(replyForDraftPreview({ state: "invalid", count: 2, errors: [{ code, max: 6, index: 0, testName: "T" }] }));
@@ -555,4 +556,33 @@ test("edits that were already applied are said plainly, and are not an error", (
   const r = replyForPreview({ state: "already-applied", workflow: "flows/demo" });
   assert.equal(r.isError, false);
   assert.match(r.text, /already applied to your workflow, so there is nothing waiting/);
+});
+
+// ---------- how a workflow looks ----------
+const WORKFLOW_LOOK = { state: "described", workflow: "workflows/demo", name: "Demo flow", steps: [{ name: "Start", kind: "start" }, { name: "Ask", kind: "outside" }, { name: "Decide", kind: "plain" }],
+  data: { start: { a: 1 }, services: { Ask: { status: "x" } } }, tests: [{ file: "01.yaml", name: "First", when: { trigger: {}, services: {} }, then: [] }, { file: "02.yaml", name: null, when: { trigger: {}, services: {} }, then: [] }], moreTests: 3, unreadable: ["bad.yaml"] };
+
+test("a workflow is described in plain words, tests listed by name, and everything technical is for the assistant", () => {
+  const r = replyForDescribe(WORKFLOW_LOOK);
+  assert.match(forPerson(r.text), /“Demo flow” works like this, step by step:/);
+  assert.match(forPerson(r.text), /3\. “Decide”/);
+  assert.match(forPerson(r.text), /It has 5 tests:/);
+  assert.match(forPerson(r.text), /• “First”/);
+  assert.match(forPerson(r.text), /• “02\.yaml”/.source ? /• “02.yaml”/ : /x/, "a test without a name is listed by its file");
+  assert.match(forPerson(r.text), /and 3 more/);
+  assert.doesNotMatch(forPerson(r.text), /status|\{|kind|outside\]/);
+  assert.match(r.text, /Could not read these test files: bad\.yaml/);
+});
+
+test("a workflow with no tests, one test, or a failed look is said plainly", () => {
+  assert.match(replyForDescribe({ ...WORKFLOW_LOOK, tests: [], moreTests: 0, unreadable: [] }).text, /It has no tests yet\./);
+  assert.match(replyForDescribe({ ...WORKFLOW_LOOK, tests: [WORKFLOW_LOOK.tests[0]], moreTests: 0 }).text, /It has 1 test:/);
+  assert.match(replyForDescribe({ ...WORKFLOW_LOOK, name: null }).text, /“demo” works like this/);
+  assert.equal(replyForDescribe({ state: "nope" }).isError, true);
+});
+
+test("a very large description is cut down for the assistant, not dumped", () => {
+  const big = { ...WORKFLOW_LOOK, data: { start: {}, services: Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`step ${i}`, { field: "y".repeat(50) }])) } };
+  const hint = replyForDescribe(big).text.split("For you, the assistant")[1];
+  assert.ok(hint.length < 9000, `the assistant part is ${hint.length} characters`);
 });

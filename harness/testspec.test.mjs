@@ -2,7 +2,7 @@
 // Run with: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSpec, parseSpecs, validateSpec, commentLine, nextTestFile, specHash, LIMITS } from "./testspec.mjs";
+import { parseSpec, parseSpecs, validateSpec, commentLine, nextTestFile, specHash, LIMITS, parseAssertion, fieldExamples, describeTestObject } from "./testspec.mjs";
 
 const STEPS = [
   { name: "Incoming", outside: false, trigger: true },
@@ -175,4 +175,37 @@ test("a request can be one test or a small list of them, and anything else is re
   assert.equal(parseSpecs(JSON.stringify([...six, one])).error.code, "too-many-in-preview");
   assert.equal(parseSpecs(JSON.stringify([{ name: "x".repeat(LIMITS.specChars) }])).error.code, "too-big");
   assert.equal(LIMITS.testsPerPreview, 6);
+});
+
+// ---------- reading existing tests back ----------
+test("each check phrase is read back into the same form a description uses", () => {
+  assert.deepEqual(parseAssertion('node "Send alert" called 1 time'), { step: "Send alert", runs: 1 });
+  assert.deepEqual(parseAssertion('node "Send alert" called 3 times'), { step: "Send alert", runs: 3 });
+  assert.deepEqual(parseAssertion('node "Ignore healthy site" not called'), { step: "Ignore healthy site", doesNotRun: true });
+  assert.deepEqual(parseAssertion('node "Compose" input.text contains "ALERT: docs"'), { step: "Compose", field: "text", contains: "ALERT: docs" });
+  assert.deepEqual(parseAssertion('node "Compose" output.reminder_count == 3'), { step: "Compose", side: "output", field: "reminder_count", is: 3 });
+  assert.deepEqual(parseAssertion('node "Send" input.chat_id != "-100555"'), { step: "Send", field: "chat_id", isNot: "-100555" });
+  assert.deepEqual(parseAssertion('workflow ends at "Send alert"'), { endsAt: "Send alert" });
+  assert.deepEqual(parseAssertion("something the runner does not understand"), { raw: "something the runner does not understand" });
+  assert.deepEqual(parseAssertion('node "S" input.text contains plain words'), { step: "S", field: "text", contains: "plain words" }, "an unquoted value is kept as text");
+});
+
+test("control: what a description writes, reading it back gives the same description", () => {
+  const spec = GOOD();
+  spec.then.push({ step: "Send alert", side: "output", field: "a.b", isNot: 3 }, { step: "Send alert", field: "ok", is: true });
+  const written = check(spec);
+  assert.equal(written.ok, true, JSON.stringify(written.errors));
+  assert.deepEqual(written.test.assert.map(parseAssertion), spec.then, "every line reads back as the item it came from");
+});
+
+test("field names and an example value are taken from the rows, first seen wins, and odd rows are skipped", () => {
+  assert.deepEqual(fieldExamples([{ status: "down", latency_ms: 1200 }, { status: "up", extra: true }, null, "x", [1]]), { status: "down", latency_ms: 1200, extra: true });
+  assert.deepEqual(fieldExamples([]), {});
+});
+
+test("a test file is described the way an assistant would write it, and an odd file is not", () => {
+  const obj = { test: "Down site", trigger: { site: "docs" }, mocks: { "Check site status": [{ status: "down" }] }, assert: ['node "Send alert" called 1 time', "odd"] };
+  assert.deepEqual(describeTestObject(obj), { name: "Down site", when: { trigger: { site: "docs" }, services: { "Check site status": [{ status: "down" }] } }, then: [{ step: "Send alert", runs: 1 }, { raw: "odd" }] });
+  assert.deepEqual(describeTestObject({ test: "Bare" }), { name: "Bare", when: { trigger: {}, services: {} }, then: [] });
+  for (const bad of [null, "text", [1], 5, undefined]) assert.equal(describeTestObject(bad), null, String(bad));
 });

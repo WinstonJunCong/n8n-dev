@@ -61,7 +61,7 @@ const BAD_NAMES = ["../etc", "..", "a/b", "a\\b", "/abs", "a b", "", "x;rm -rf",
 // ---------- the tools as a set ----------
 test("every tool has a name, a plain description, a strict schema and annotations", () => {
   const { tools } = build();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "draft_test_preview", "draft_test_remove", "draft_test_save", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit", "submit_preview", "ui_discard", "ui_resume", "ui_start", "ui_stop", "undo_change", "update_tests"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["check_workflow", "describe_workflow", "draft_test_preview", "draft_test_remove", "draft_test_save", "explain_test_failures", "list_workflows", "pull_apply", "pull_preview", "status", "submit", "submit_preview", "ui_discard", "ui_resume", "ui_start", "ui_stop", "undo_change", "update_tests"]);
   for (const t of tools) {
     assert.ok(t.description.length > 30, t.name);
     assert.equal(t.inputSchema.type, "object", t.name);
@@ -75,7 +75,7 @@ test("only pull_apply, update_tests, ui_discard, draft_test_remove and undo_chan
   const { tools } = build();
   assert.deepEqual(tools.filter((t) => t.annotations.destructiveHint).map((t) => t.name).sort(), ["draft_test_remove", "pull_apply", "ui_discard", "undo_change", "update_tests"]);
   assert.deepEqual(tools.filter((t) => t.annotations.readOnlyHint).map((t) => t.name).sort(),
-    ["check_workflow", "draft_test_preview", "explain_test_failures", "list_workflows", "pull_preview", "status", "submit_preview"]);
+    ["check_workflow", "describe_workflow", "draft_test_preview", "explain_test_failures", "list_workflows", "pull_preview", "status", "submit_preview"]);
 });
 
 test("every tool that takes a workflow refuses bad names without running anything", async () => {
@@ -1072,4 +1072,48 @@ test("an old preview of a change to send for review is explained the same way, a
   assert.match(r.text, /That preview of the sending is out of date/);
   assert.match(r.text, /submit_preview again.*Never preview and save in the same step/s);
   assert.equal(sendCalls(ctx).length, 0, "nothing was sent");
+});
+
+// ---------- describe_workflow ----------
+const DESCRIBED = say({
+  state: "described", workflow: "workflows/site-health-alert", name: "Site health alert",
+  steps: [{ name: "Health check request", kind: "start" }, { name: "Check site status", kind: "outside" }, { name: "Compose alert", kind: "plain" }, { name: "Send alert", kind: "outside" }],
+  data: { start: { site: "docs" }, services: { "Check site status": { status: "down", latency_ms: 1200 }, "Send alert": { ok: true } } },
+  tests: [{ file: "01.yaml", name: "Down site sends an alert", when: { trigger: { site: "docs" }, services: { "Check site status": [{ status: "down", latency_ms: 1200 }] } }, then: [{ step: "Send alert", runs: 1 }] }],
+  moreTests: 0, unreadable: [],
+});
+
+test("describe_workflow tells the person what the workflow does and gives the assistant the exact names and data", async () => {
+  const ctx = build({ answers: [DESCRIBED] });
+  const r = await ctx.byName.describe_workflow.handler({ workflow: "site-health-alert" });
+  assert.equal(r.isError, false);
+  assert.deepEqual(ctx.calls[0].args, ["describe", "workflows/site-health-alert"]);
+  assert.match(r.text, /“Site health alert” works like this, step by step:/);
+  assert.match(r.text, /1\. “Health check request” \(where it starts\)/);
+  assert.match(r.text, /2\. “Check site status” \(talks to an outside service\)/);
+  assert.match(r.text, /3\. “Compose alert”\n/);
+  assert.match(r.text, /It has 1 test:\n• “Down site sends an alert”/);
+  const person = r.text.split("For you, the assistant")[0];
+  assert.doesNotMatch(person, /latency_ms|1200|\{/, "no field names or data shown to the person");
+  assert.match(r.text, /For you, the assistant.*use EXACTLY these step names and field names.*never invent a field name/s);
+  assert.match(r.text, /Check site status \[outside\]/);
+  assert.match(r.text, /"Check site status":\{"status":"down","latency_ms":1200\}/);
+  assert.match(r.text, /Data the starting event carries.*"site":"docs"/s);
+});
+
+test("describe_workflow is read-only, refuses bad names and odd arguments before running anything, and handles odd answers", async () => {
+  const ctx = build({ answers: [DESCRIBED] });
+  assert.equal(ctx.byName.describe_workflow.annotations.readOnlyHint, true);
+  for (const workflow of BAD_NAMES) assert.equal((await ctx.byName.describe_workflow.handler({ workflow })).isError, true, workflow);
+  assert.equal((await ctx.byName.describe_workflow.handler({ workflow: "site-health-alert", extra: 1 })).isError, true);
+  assert.equal(ctx.calls.length, 0);
+  assert.equal((await build({ answers: [{ status: 1, stdout: "junk", out: "junk" }] }).byName.describe_workflow.handler({ workflow: "site-health-alert" })).isError, true);
+  assert.equal((await build({ answers: [say({ state: "nope" }, 1)] }).byName.describe_workflow.handler({ workflow: "site-health-alert" })).isError, true);
+});
+
+test("the assistant is steered to describe_workflow before writing a test", async () => {
+  const { byName } = build();
+  assert.match(byName.draft_test_preview.description, /First call describe_workflow and copy the step names and field names/);
+  assert.match(byName.describe_workflow.description, /BEFORE writing a test with draft_test_preview/);
+  assert.match(byName.describe_workflow.description, /never invent a field name/);
 });

@@ -84,7 +84,7 @@ const realTools = () => createTools({
 test("registerAll registers every tool with its title, description, strict schema and annotations", () => {
   const registered = [];
   registerAll({ registerTool: (name, config, cb) => registered.push({ name, config, cb }) }, realTools());
-  assert.equal(registered.length, 17);
+  assert.equal(registered.length, 18);
   for (const r of registered) {
     assert.ok(r.config.title && r.config.title.length > 3, `${r.name} needs a title`);
     assert.ok(r.config.description.length > 30, r.name);

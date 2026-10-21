@@ -297,6 +297,31 @@ export function replyForTestUpdate(j) {
   return replyForTestFix(j);
 }
 
+// ---------- how a workflow looks ----------
+const STEP_NOTE = { start: " (where it starts)", outside: " (talks to an outside service)", plain: "" };
+const compact = (v, max) => { const s = JSON.stringify(v); return s.length > max ? `${s.slice(0, max - 1)}…` : s; };
+
+// What the person reads: what the workflow does, step by step, and which tests it has. What the assistant gets, in the part
+// marked for it: the exact step names, the field names and example values the existing tests use, and the tests themselves.
+export function replyForDescribe(j) {
+  if (j.state !== "described") return reply("I couldn't look at that workflow just now.", undefined, true);
+  const name = j.name ? `${q(j.name)}` : q(String(j.workflow ?? "").split("/").pop());
+  const steps = (j.steps ?? []).map((s, i) => `${i + 1}. ${q(s.name)}${STEP_NOTE[s.kind] ?? ""}`);
+  const tests = (j.tests ?? []).map((t) => q(t.name ?? t.file));
+  const parts = [`${name} works like this, step by step:\n${steps.join("\n")}`];
+  parts.push(tests.length ? `It has ${tests.length + (j.moreTests ?? 0)} test${tests.length + (j.moreTests ?? 0) === 1 ? "" : "s"}:\n${bullets(tests)}${j.moreTests ? `\n• and ${j.moreTests} more` : ""}` : "It has no tests yet.");
+  const data = j.data ?? {};
+  const hint = [
+    "use EXACTLY these step names and field names when you write a test; never invent a field name. If the person needs data that does not appear here, ask them what it is called.",
+    `Steps in order: ${(j.steps ?? []).map((s) => `${s.name} [${s.kind}]`).join(" -> ")}.`,
+    `Data the starting event carries in the existing tests: ${compact(data.start ?? {}, 600)}.`,
+    `Pretend answers the existing tests give outside steps (field: example): ${compact(data.services ?? {}, 1500)}.`,
+    `Existing tests in the form a description is written in (copy this shape): ${compact((j.tests ?? []).slice(0, 3).map((t) => ({ name: t.name, when: t.when, then: t.then })), 3500)}.`,
+    j.unreadable?.length ? `Could not read these test files: ${j.unreadable.join(", ")}.` : "",
+  ].filter(Boolean).join(" ");
+  return reply(parts.join("\n\n"), hint);
+}
+
 // ---------- tests written from the person's own words ----------
 const wordsOf = (s) => String(s).replace(/[._]+/g, " ");
 const valueText = (v) => {
